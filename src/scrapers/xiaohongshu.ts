@@ -1,10 +1,11 @@
-import { BaseScraper } from './base.js';
+import { BaseScraper, ScraperPreflightResult } from './base.js';
 import { ContentItem } from '../types/content.js';
 import { logger } from '../utils/logger.js';
 import { retry, retryStrategies } from '../utils/retry.js';
 import { config } from '../config.js';
 import { hasLocalBrowserProfile, launchLocalBrowser } from './local-browser.js';
 import { RecoverableFailure } from '../utils/failure.js';
+import { asRecoverableFailure, probeCookieSession } from './session-probes.js';
 import type { RateLimiter } from '../utils/rate-limiter.js';
 import type { XiaohongshuSourceRuntimeConfig } from '../types/runtime-config.js';
 import type { Page } from 'puppeteer';
@@ -70,6 +71,11 @@ export class XiaohongshuScraper extends BaseScraper {
   protected healthCheckUrl(): string {
     return `${this.baseUrl}/explore`;
   }
+
+  async preflight(): Promise<ScraperPreflightResult> {
+    return await probeCookieSession('xiaohongshu', this.sourceConfig.cookie) || { ok: true };
+  }
+
   private sourceConfig: XiaohongshuSourceRuntimeConfig;
   private keywords: string[];
 
@@ -92,6 +98,7 @@ export class XiaohongshuScraper extends BaseScraper {
       logger.info('Starting Xiaohongshu scrape...');
 
       if (this.keywords.length > 0) {
+        await this.ensureAuthenticatedSession();
         return await this.scrapeKeywords();
       }
 
@@ -261,9 +268,18 @@ export class XiaohongshuScraper extends BaseScraper {
         throw new RecoverableFailure('auth_required', '小红书登录态失效，需要重新登录', true, '重新登录');
       }
 
-      return (response.data?.items || [])
+      const notes = (response.data?.items || [])
         .map((item) => this.convertSearchItem(item))
         .filter((item): item is XiaohongshuNote => Boolean(item));
+      if (notes.length === 0) {
+        throw new RecoverableFailure(
+          'platform_changed',
+          '小红书登录有效，但搜索接口未返回内容，可能是签名失效或页面改版',
+          false,
+          '等待适配'
+        );
+      }
+      return notes;
     } catch (error) {
       if (error instanceof RecoverableFailure) {
         throw error;
@@ -272,6 +288,17 @@ export class XiaohongshuScraper extends BaseScraper {
       return [];
     } finally {
       await browser?.close().catch(() => undefined);
+    }
+  }
+
+  private async ensureAuthenticatedSession(): Promise<void> {
+    const probe = await this.preflight();
+    if (
+      !probe.ok &&
+      probe.failure &&
+      (probe.failure.failureType === 'auth_required' || probe.failure.failureType === 'captcha_required')
+    ) {
+      throw asRecoverableFailure(probe.failure);
     }
   }
 

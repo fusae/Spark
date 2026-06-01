@@ -11,6 +11,7 @@ import { MultiUserScheduler } from '../runtime/multi-user-scheduler.js';
 import { RuntimeTaskRunner } from '../runtime/task-runner.js';
 import { RuntimeWorker } from '../runtime/worker.js';
 import { sourceNames, UserRuntimeConfig } from '../types/runtime-config.js';
+import { findBrowserExecutable } from '../utils/browser-launcher.js';
 import { logger } from '../utils/logger.js';
 import { CookieHelper, isCookiePlatform } from './cookie-helper.js';
 import { isAiCredential, validateAiCredential, validateCredential } from './credential-validator.js';
@@ -303,6 +304,11 @@ class AdminServer {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/diagnostics/environment') {
+        this.json(res, this.environmentDiagnostics());
+        return;
+      }
+
       this.json(res, { error: 'Not found' }, 404);
     } catch (error) {
       logger.error('Admin request failed', error as Error);
@@ -445,7 +451,7 @@ class AdminServer {
         user_id: userId,
         platform,
         status: 'unknown',
-        message: isCookiePlatform(platform) ? '已保存登录态，等待验证' : '已保存 API Key，等待验证',
+        message: isCookiePlatform(platform) ? '已保存登录状态，等待检查' : '已保存密钥，等待验证',
       });
     }
     return runtimeConfig;
@@ -481,7 +487,7 @@ class AdminServer {
         user_id: userId,
         platform: 'embedding',
         status: 'unknown',
-        message: '已更新内容筛选 API Key，等待验证',
+        message: '已更新内容智能筛选密钥，等待验证',
       });
     }
     if (Object.prototype.hasOwnProperty.call(incoming.ai?.deepseek || {}, 'apiKey')) {
@@ -489,7 +495,7 @@ class AdminServer {
         user_id: userId,
         platform: 'deepseek',
         status: 'unknown',
-        message: '已更新内容创作 API Key，等待验证',
+        message: '已更新 AI 自动写草稿密钥，等待验证',
       });
     }
   }
@@ -882,6 +888,24 @@ class AdminServer {
     return sourceNames.filter((source) => source !== 'x' && source !== 'producthunt') as typeof sourceNames;
   }
 
+  private environmentDiagnostics(): Record<string, unknown> {
+    const browserPath = findBrowserExecutable();
+    return {
+      browser: {
+        ok: Boolean(browserPath),
+        message: browserPath ? '浏览器已就绪' : '未找到 Chrome、Edge 或 Brave，登录平台无法使用',
+      },
+      credentialStorage: {
+        ok: Boolean(process.env.CREDENTIAL_ENCRYPTION_KEY),
+        message: process.env.CREDENTIAL_ENCRYPTION_KEY ? '本机凭证已加密存储' : '当前凭证未启用加密存储',
+      },
+      backgroundScraping: {
+        ok: process.env.LOCAL_SCRAPER_HEADLESS !== 'false',
+        message: process.env.LOCAL_SCRAPER_HEADLESS === 'false' ? '抓取浏览器处于可见调试模式' : '正常抓取将在后台运行',
+      },
+    };
+  }
+
   private async readJson(req: IncomingMessage): Promise<JsonBody> {
     const chunks: Uint8Array[] = [];
     for await (const chunk of req) {
@@ -928,6 +952,7 @@ class AdminServer {
       png: 'image/png',
       svg: 'image/svg+xml; charset=utf-8',
       icns: 'image/icns',
+      css: 'text/css; charset=utf-8',
     };
     res.writeHead(200, {
       'content-type': contentTypes[ext] || 'application/octet-stream',
@@ -950,7 +975,7 @@ class AdminServer {
   <title>Spark - 管理后台</title>
   <link rel="icon" type="image/png" href="/assets/spark-icon-32.png">
   <link rel="apple-touch-icon" href="/assets/spark-icon.png">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="/assets/tailwind.css">
   <style>
     [x-cloak] { display: none !important; }
     :root {
@@ -996,22 +1021,50 @@ class AdminServer {
     }
     .btn-primary:hover { background: #1e40af; }
     .btn-primary:active { transform: translateY(1px); }
+    .config-nav-button {
+      border-radius: 6px;
+      border: 1px solid #dbe3ee;
+      background: #fff;
+      padding: 6px 10px;
+      color: #475569;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .config-nav-button:hover { border-color: #93c5fd; color: #1d4ed8; }
+    .config-section { scroll-margin-top: 132px; }
+    details > summary { cursor: pointer; list-style: none; }
+    details > summary::-webkit-details-marker { display: none; }
   </style>
 </head>
 <body class="admin-shell">
   <!-- Header -->
   <header class="bg-white border-b border-gray-200 sticky top-0 z-50">
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      <div class="flex justify-between items-center h-16">
+      <div class="flex min-h-16 justify-between gap-3 py-2">
         <div class="flex items-center gap-3">
           <img src="/assets/spark-logo.svg" alt="" class="h-9 w-9">
           <h1 class="text-xl font-bold text-gray-900">Spark</h1>
-          <span class="ml-3 px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded">管理后台</span>
+          <span class="ml-3 hidden whitespace-nowrap rounded bg-blue-100 px-2 py-1 text-xs font-medium text-blue-800 sm:inline-flex">管理后台</span>
         </div>
-        <div class="flex items-center space-x-4">
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <button data-action="run" onclick="runUser()" class="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-wait disabled:bg-blue-300">
+            立即运行
+          </button>
+          <button data-action="diagnose" onclick="diagnoseSystem()" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-wait disabled:text-gray-400">
+            一键诊断
+          </button>
+          <button data-action="test-push" onclick="testPush()" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-wait disabled:text-gray-400">
+            测试推送
+          </button>
+          <select id="headerUserSelect" onchange="selectUser(encodeURIComponent(this.value))" class="max-w-40 rounded-md border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700">
+            <option value="local">local</option>
+          </select>
+          <button onclick="toggleUserManager()" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+            管理用户
+          </button>
           <div id="statusIndicator" class="flex items-center">
-            <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-            <span class="ml-2 text-sm text-gray-600">运行中</span>
+            <div id="statusDot" class="w-2 h-2 bg-gray-400 rounded-full"></div>
+            <span id="statusText" class="ml-2 text-sm text-gray-600">空闲</span>
           </div>
         </div>
       </div>
@@ -1020,10 +1073,10 @@ class AdminServer {
 
   <!-- Main Content -->
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-    <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+    <div class="grid grid-cols-1 gap-6">
 
       <!-- Sidebar - User List -->
-      <div class="lg:col-span-1">
+      <div id="userManager" class="hidden">
         <div class="admin-card">
           <div class="p-4 border-b border-gray-200">
             <h2 class="text-lg font-semibold text-gray-900">用户</h2>
@@ -1053,16 +1106,19 @@ class AdminServer {
       </div>
 
       <!-- Main Panel -->
-      <div class="lg:col-span-3">
+      <div>
         <!-- Tabs -->
         <div class="admin-card">
           <div class="border-b border-gray-200">
-            <nav class="flex -mb-px">
+            <nav class="flex -mb-px overflow-x-auto whitespace-nowrap">
               <button onclick="switchTab('overview')" id="tab-overview" class="tab-button active px-6 py-3 text-sm font-medium border-b-2 border-blue-600 text-blue-600">
                 概览
               </button>
               <button onclick="switchTab('recommendations')" id="tab-recommendations" class="tab-button px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">
                 推荐内容
+              </button>
+              <button onclick="switchTab('data')" id="tab-data" class="tab-button px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">
+                数据浏览
               </button>
               <button onclick="switchTab('config')" id="tab-config" class="tab-button px-6 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">
                 配置
@@ -1081,6 +1137,8 @@ class AdminServer {
 
             <!-- Overview Tab -->
             <div id="content-overview" class="tab-content">
+              <div id="activationChecklist" class="mb-6"></div>
+
               <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                 <div class="metric-card bg-blue-50 p-4">
                   <div class="text-sm text-blue-600 font-medium">已启用平台</div>
@@ -1108,32 +1166,27 @@ class AdminServer {
                 <div id="platformHealthGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3"></div>
               </div>
 
-              <div class="mb-6">
-                <div class="flex items-center justify-between mb-3">
-                  <h3 class="text-sm font-semibold text-gray-900">AI 健康状态</h3>
-                  <button onclick="diagnoseSystem()" class="text-xs font-medium text-blue-700 hover:text-blue-900">一键诊断</button>
+              <details class="mb-6 rounded-lg border border-gray-200 bg-gray-50 p-4">
+                <summary class="flex items-center justify-between gap-3 text-sm font-semibold text-gray-900">
+                  <span>诊断详情</span>
+                  <button data-action="diagnose" onclick="event.preventDefault(); diagnoseSystem()" class="text-xs font-medium text-blue-700 hover:text-blue-900 disabled:text-gray-400">一键诊断</button>
+                </summary>
+                <div class="mt-4">
+                  <h3 class="mb-3 text-sm font-semibold text-gray-900">AI 健康状态</h3>
+                  <div id="aiHealthGrid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
                 </div>
-                <div id="aiHealthGrid" class="grid grid-cols-1 md:grid-cols-2 gap-3"></div>
-              </div>
+                <div class="mt-4">
+                  <h3 class="mb-3 text-sm font-semibold text-gray-900">本机环境</h3>
+                  <div id="environmentHealthGrid" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
+                </div>
+              </details>
 
               <div id="runOutcomeCard" class="mb-6 rounded-lg border border-gray-200 bg-white p-4"></div>
 
-              <div class="flex space-x-3 mb-6">
-                <button onclick="runUser()" class="flex-1 btn-primary px-4 py-3 font-medium">
-                  立即运行
-                </button>
-                <button onclick="diagnoseSystem()" class="flex-1 bg-gray-900 text-white px-4 py-3 rounded-md hover:bg-gray-800 transition font-medium">
-                  一键诊断
-                </button>
-                <button onclick="testPush()" class="flex-1 bg-green-600 text-white px-4 py-3 rounded-md hover:bg-green-700 transition font-medium">
-                  测试飞书推送
-                </button>
-              </div>
-
-              <div id="statusBox" class="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                <div class="text-sm font-medium text-gray-700 mb-2">状态信息</div>
-                <pre id="status" class="text-xs text-gray-600 whitespace-pre-wrap font-mono"></pre>
-              </div>
+              <details id="statusBox" class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                <summary class="text-sm font-medium text-gray-700">状态信息</summary>
+                <pre id="status" class="mt-3 text-xs text-gray-600 whitespace-pre-wrap font-mono"></pre>
+              </details>
             </div>
 
             <!-- Recommendations Tab -->
@@ -1158,28 +1211,43 @@ class AdminServer {
                 <div class="text-gray-500">加载中...</div>
               </div>
 
-              <div class="mt-8 border-t border-gray-200 pt-6">
-                <div class="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <h3 class="text-lg font-semibold text-gray-900">最新抓取内容</h3>
-                    <p class="mt-1 text-sm text-gray-500">这里显示已经入库的原始内容，推荐卡片会从这些内容里筛选生成。</p>
-                  </div>
-                  <select id="contentSourceFilter" onchange="loadRecommendations()" class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm md:w-48">
+            </div>
+
+            <!-- Data Tab -->
+            <div id="content-data" class="tab-content hidden">
+              <div class="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <h2 class="text-xl font-semibold text-gray-900">数据浏览</h2>
+                  <p class="mt-1 text-sm text-gray-500">查看已经入库的原始内容，用于排查抓取结果和来源质量。</p>
+                </div>
+                <div class="flex gap-2">
+                  <select id="contentSourceFilter" onchange="loadRawContent()" class="w-full rounded-md border border-gray-300 px-3 py-2 text-sm md:w-48">
                     <option value="">全部平台</option>
                   </select>
+                  <button onclick="loadRawContent()" class="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                    刷新
+                  </button>
                 </div>
-                <div id="rawContentList" class="space-y-3">
-                  <div class="text-gray-500">加载中...</div>
-                </div>
+              </div>
+              <div id="rawContentList" class="space-y-3">
+                <div class="text-gray-500">加载中...</div>
               </div>
             </div>
 
             <!-- Config Tab -->
             <div id="content-config" class="tab-content hidden">
-              <div class="space-y-6">
+              <div class="sticky top-16 z-20 -mx-2 mb-5 flex flex-wrap gap-2 border-b border-gray-200 bg-white/95 px-2 py-3 backdrop-blur">
+                <button onclick="scrollConfigSection('config-basic')" class="config-nav-button">基本信息</button>
+                <button onclick="scrollConfigSection('config-profile')" class="config-nav-button">账号画像</button>
+                <button onclick="scrollConfigSection('config-keywords')" class="config-nav-button">搜索关键词</button>
+                <button onclick="scrollConfigSection('config-schedule')" class="config-nav-button">定时任务</button>
+                <button onclick="scrollConfigSection('config-ai')" class="config-nav-button">AI 能力</button>
+                <button onclick="scrollConfigSection('config-feishu')" class="config-nav-button">飞书推送</button>
+              </div>
+              <div class="flex flex-col gap-6">
 
                 <!-- Basic Info Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <div id="config-basic" style="order: 1" class="config-section bg-white border border-gray-200 rounded-lg p-6">
                   <h3 class="text-lg font-semibold text-gray-900 mb-4">基本信息</h3>
                   <div class="space-y-4">
                     <div>
@@ -1199,48 +1267,61 @@ class AdminServer {
                 </div>
 
                 <!-- AI Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
-                  <h3 class="text-lg font-semibold text-gray-900 mb-4">模型配置</h3>
-                  <div class="space-y-4">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Embedding API Key</label>
+                <details id="config-ai" style="order: 5" class="config-section bg-white border border-gray-200 rounded-lg p-6">
+                  <summary class="flex items-center justify-between gap-3">
+                    <h3 class="text-lg font-semibold text-gray-900">AI 能力</h3>
+                    <span class="text-xs text-gray-500">点击展开</span>
+                  </summary>
+                  <div class="mt-4 space-y-5">
+                    <p class="text-sm text-gray-600">只想先跑起来可以跳过；补上以后，Spark 才会自动筛选内容并生成草稿。</p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div class="mb-3">
+                          <label class="block text-sm font-semibold text-gray-900">内容智能筛选密钥</label>
+                          <p class="mt-1 text-xs text-gray-500">用来从每天抓到的内容里挑出最值得看的部分。</p>
+                        </div>
                         <div class="flex gap-2">
-                          <input id="configEmbeddingApiKey" type="password" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="阿里云百炼 API Key">
+                          <input id="configEmbeddingApiKey" type="password" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="粘贴内容智能筛选密钥（阿里云百炼）">
                           <button onclick="validateAiCredential('embedding')" class="px-3 py-2 text-sm rounded-md bg-emerald-600 text-white hover:bg-emerald-700">验证</button>
                           <button onclick="clearCredential('embedding')" class="px-3 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">清空</button>
                         </div>
                         <p id="configEmbeddingStatus" class="mt-1 text-xs text-gray-500">未配置</p>
                       </div>
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Embedding Base URL</label>
-                        <input id="configEmbeddingBaseUrl" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
-                      </div>
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Embedding Model</label>
-                        <input id="configEmbeddingModel" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="text-embedding-v4">
-                      </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">DeepSeek API Key</label>
+                      <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+                        <div class="mb-3">
+                          <label class="block text-sm font-semibold text-gray-900">AI 自动写草稿密钥</label>
+                          <p class="mt-1 text-xs text-gray-500">用来为推荐内容生成短、中、长三种草稿。</p>
+                        </div>
                         <div class="flex gap-2">
-                          <input id="configDeepseekApiKey" type="password" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="DeepSeek API Key">
+                          <input id="configDeepseekApiKey" type="password" class="min-w-0 flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="粘贴 AI 自动写草稿密钥（DeepSeek）">
                           <button onclick="validateAiCredential('deepseek')" class="px-3 py-2 text-sm rounded-md bg-emerald-600 text-white hover:bg-emerald-700">验证</button>
                           <button onclick="clearCredential('deepseek')" class="px-3 py-2 text-sm rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50">清空</button>
                         </div>
                         <p id="configDeepseekStatus" class="mt-1 text-xs text-gray-500">未配置</p>
                       </div>
-                      <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">DeepSeek Base URL</label>
-                        <input id="configDeepseekBaseUrl" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://api.deepseek.com">
-                      </div>
                     </div>
+                    <details class="rounded-lg border border-gray-200 bg-white p-4">
+                      <summary class="text-sm font-medium text-gray-700">高级参数</summary>
+                      <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                          <label class="block text-sm font-medium text-gray-700 mb-2">内容筛选服务地址</label>
+                          <input id="configEmbeddingBaseUrl" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+                        </div>
+                        <div>
+                          <label class="block text-sm font-medium text-gray-700 mb-2">内容筛选模型</label>
+                          <input id="configEmbeddingModel" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="text-embedding-v4">
+                        </div>
+                        <div>
+                          <label class="block text-sm font-medium text-gray-700 mb-2">写草稿服务地址</label>
+                          <input id="configDeepseekBaseUrl" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="https://api.deepseek.com">
+                        </div>
+                      </div>
+                    </details>
                   </div>
-                </div>
+                </details>
 
                 <!-- Source Parameters Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <div id="config-keywords" style="order: 3" class="config-section bg-white border border-gray-200 rounded-lg p-6">
                   <h3 class="text-lg font-semibold text-gray-900 mb-2">搜索关键词</h3>
                   <p class="text-sm text-gray-500 mb-4">仅支持站内搜索的平台需要关键词；Hacker News、GitHub、V2EX 抓热门榜后由模型筛选。</p>
                   <div class="space-y-4">
@@ -1270,7 +1351,7 @@ class AdminServer {
                 </div>
 
                 <!-- Profile Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <div id="config-profile" style="order: 2" class="config-section bg-white border border-gray-200 rounded-lg p-6">
                   <h3 class="text-lg font-semibold text-gray-900 mb-4">账号画像</h3>
                   <div class="space-y-4">
                     <div>
@@ -1297,7 +1378,7 @@ class AdminServer {
                 </div>
 
                 <!-- Schedule Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
+                <div id="config-schedule" style="order: 4" class="config-section bg-white border border-gray-200 rounded-lg p-6">
                   <h3 class="text-lg font-semibold text-gray-900 mb-4">定时任务</h3>
                   <div class="space-y-4">
                     <div>
@@ -1331,9 +1412,12 @@ class AdminServer {
                 </div>
 
                 <!-- Feishu Section -->
-                <div class="bg-white border border-gray-200 rounded-lg p-6">
-                  <h3 class="text-lg font-semibold text-gray-900 mb-4">飞书配置</h3>
-                  <div class="space-y-4">
+                <details id="config-feishu" style="order: 6" class="config-section bg-white border border-gray-200 rounded-lg p-6">
+                  <summary class="flex items-center justify-between gap-3">
+                    <h3 class="text-lg font-semibold text-gray-900">飞书推送</h3>
+                    <span class="text-xs text-gray-500">点击展开</span>
+                  </summary>
+                  <div class="mt-4 space-y-4">
                     <div>
                       <label class="block text-sm font-medium text-gray-700 mb-2">App ID</label>
                       <input id="configFeishuAppId" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="从飞书开放平台获取">
@@ -1351,11 +1435,11 @@ class AdminServer {
                       <input id="configFeishuReceiverId" type="text" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="接收消息的用户或群组 ID">
                     </div>
                   </div>
-                </div>
+                </details>
 
                 <!-- Save Button -->
-                <div class="flex items-center justify-between">
-                  <button onclick="saveUserFromForm()" class="bg-blue-600 text-white px-8 py-3 rounded-md hover:bg-blue-700 transition font-medium text-lg">
+                <div style="order: 7" class="flex items-center justify-between">
+                  <button data-action="save-config" onclick="saveUserFromForm()" class="bg-blue-600 text-white px-8 py-3 rounded-md hover:bg-blue-700 disabled:bg-blue-300 transition font-medium text-lg">
                     保存所有配置
                   </button>
                   <button onclick="toggleAdvancedConfig()" class="text-sm text-gray-600 hover:text-gray-900 underline">
@@ -1364,7 +1448,7 @@ class AdminServer {
                 </div>
 
                 <!-- Advanced JSON Editor (Hidden by default) -->
-                <div id="advancedConfigContainer" class="hidden">
+                <div id="advancedConfigContainer" style="order: 8" class="hidden">
                   <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
                     <p class="text-sm text-yellow-800">⚠️ 高级模式：直接编辑 JSON 配置，请谨慎操作</p>
                   </div>
@@ -1399,14 +1483,16 @@ class AdminServer {
               </div>
 
               <div class="mt-6">
-                <button onclick="savePlatformConfig()" class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 transition font-medium">
+                <button data-action="save-platforms" onclick="savePlatformConfig()" class="bg-blue-600 text-white px-6 py-2 rounded-md hover:bg-blue-700 disabled:bg-blue-300 transition font-medium">
                   保存平台配置
                 </button>
               </div>
 
-              <div class="mt-6 space-y-4">
+              <details class="mt-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
+                <summary class="text-sm font-medium text-blue-800">查看登录帮助</summary>
+                <div class="mt-4 space-y-4">
                 <!-- Cookie 获取教程 -->
-                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <div>
                   <div class="flex">
                     <div class="flex-shrink-0">
                       <svg class="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
@@ -1438,7 +1524,7 @@ class AdminServer {
                 </div>
 
                 <!-- 平台说明 -->
-                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                <div class="rounded-lg border border-gray-200 bg-white p-4">
                   <h3 class="text-sm font-medium text-gray-800 mb-2">平台说明</h3>
                   <div class="text-sm text-gray-600 space-y-1">
                     <p>🔐 <strong>需要登录：</strong>知乎、抖音、小红书、微博</p>
@@ -1448,7 +1534,7 @@ class AdminServer {
                 </div>
 
                 <!-- Cookie 安全提示 -->
-                <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                <div class="rounded-lg border border-yellow-200 bg-yellow-50 p-4">
                   <div class="flex">
                     <div class="flex-shrink-0">
                       <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
@@ -1461,12 +1547,23 @@ class AdminServer {
                     </div>
                   </div>
                 </div>
-              </div>
+                </div>
+              </details>
             </div>
 
             <!-- Logs Tab -->
             <div id="content-logs" class="tab-content hidden">
-              <div class="mb-4">
+              <div class="mb-4 flex flex-wrap items-center gap-3">
+                <select id="logStatusFilter" onchange="loadLogs()" class="rounded-md border border-gray-300 bg-white px-3 py-2 text-sm">
+                  <option value="">全部状态</option>
+                  <option value="running">运行中</option>
+                  <option value="succeeded">成功</option>
+                  <option value="failed">失败</option>
+                </select>
+                <label class="flex items-center gap-2 text-sm text-gray-600">
+                  <input id="logAutoScroll" type="checkbox" checked>
+                  自动定位最新
+                </label>
                 <button onclick="loadLogs()" class="bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 transition">
                   刷新日志
                 </button>
@@ -1495,14 +1592,31 @@ class AdminServer {
     </div>
   </div>
 
+  <div id="loginProgressModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+    <div class="w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="text-xs font-semibold text-blue-700">平台连接</p>
+          <h3 id="loginProgressTitle" class="mt-1 text-xl font-bold text-gray-900">请在浏览器中完成登录</h3>
+        </div>
+        <span id="loginProgressCountdown" class="rounded-md bg-gray-100 px-2 py-1 text-sm font-semibold text-gray-700">05:00</span>
+      </div>
+      <p id="loginProgressMessage" class="mt-4 text-sm leading-6 text-gray-600"></p>
+      <div class="mt-5 rounded-md bg-blue-50 p-3 text-sm text-blue-800">
+        完成后不需要点击按钮，Spark 会自动检测并继续运行。
+      </div>
+    </div>
+  </div>
+
   <script>
     const urlParams = new URLSearchParams(window.location.search);
     const initialUserId = urlParams.get('userId') || 'local';
-    const initialTab = ['overview', 'recommendations', 'config', 'platforms', 'logs'].includes(urlParams.get('tab') || '')
+    const initialTab = ['overview', 'recommendations', 'data', 'config', 'platforms', 'logs'].includes(urlParams.get('tab') || '')
       ? urlParams.get('tab')
       : '';
     let currentUserId = initialUserId;
     let currentConfig = null;
+    let currentProfile = null;
     let selectedPlatformId = null;
     let logsRefreshTimer = null;
     let recommendationsRefreshTimer = null;
@@ -1515,6 +1629,8 @@ class AdminServer {
     let latestRunId = null;
     let watchedRunPreviousId = null;
     let watchedRunDeadline = 0;
+    let environmentStatus = null;
+    let loginCountdownTimer = null;
     const tokenFromUrl = urlParams.get('token');
     const adminTokenKey = 'sparkAdminToken';
     const legacyAdminTokenKey = 'contentScoutAdminToken';
@@ -1532,8 +1648,8 @@ class AdminServer {
       { id: 'zhihu', name: '知乎', icon: '知', color: 'bg-blue-600', needsAuth: 'cookie', description: '需要登录' },
       { id: 'reddit', name: 'Reddit', icon: 'RD', color: 'bg-orange-600', needsAuth: false, description: '免费使用' },
       { id: 'v2ex', name: 'V2EX', icon: 'V2', color: 'bg-gray-700', needsAuth: false, description: '免费使用' },
-      { id: 'douyin', name: '抖音', icon: '抖', color: 'bg-black', needsAuth: 'cookie', description: '需要 Cookie' },
-      { id: 'xiaohongshu', name: '小红书', icon: '小', color: 'bg-red-500', needsAuth: 'cookie', description: '需要 Cookie' },
+      { id: 'douyin', name: '抖音', icon: '抖', color: 'bg-black', needsAuth: 'cookie', description: '需要登录' },
+      { id: 'xiaohongshu', name: '小红书', icon: '小', color: 'bg-red-500', needsAuth: 'cookie', description: '需要登录' },
       { id: 'weibo', name: '微博', icon: '微', color: 'bg-yellow-500', needsAuth: 'cookie', description: '需要登录' }
     ];
 
@@ -1566,6 +1682,61 @@ class AdminServer {
       setTimeout(() => toast.classList.add('hidden'), 3000);
     }
 
+    function setActionBusy(action, busy, busyText) {
+      document.querySelectorAll(\`[data-action="\${action}"]\`).forEach(button => {
+        if (!button.dataset.defaultText) {
+          button.dataset.defaultText = button.textContent.trim();
+        }
+        button.disabled = busy;
+        button.textContent = busy ? busyText : button.dataset.defaultText;
+      });
+    }
+
+    function setRuntimeStatus(status, label) {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      if (!dot || !text) return;
+      const colors = {
+        idle: 'bg-gray-400',
+        running: 'bg-blue-500',
+        warning: 'bg-amber-500',
+        error: 'bg-red-500'
+      };
+      dot.className = \`w-2 h-2 rounded-full \${colors[status] || colors.idle}\${status === 'running' ? ' animate-pulse' : ''}\`;
+      text.textContent = label;
+    }
+
+    function updateRuntimeStatusFromRun(run) {
+      if (!run) {
+        setRuntimeStatus('idle', '空闲');
+        return;
+      }
+      if (run.status === 'running') {
+        setRuntimeStatus('running', '运行中');
+      } else if (run.status === 'failed') {
+        setRuntimeStatus('error', '运行失败');
+      } else {
+        setRuntimeStatus('idle', '空闲');
+      }
+    }
+
+    function scrollConfigSection(id) {
+      const section = document.getElementById(id);
+      if (section?.tagName === 'DETAILS') {
+        section.open = true;
+      }
+      section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function openConfigSection(id) {
+      switchTab('config');
+      setTimeout(() => scrollConfigSection(id), 0);
+    }
+
+    function toggleUserManager() {
+      document.getElementById('userManager')?.classList.toggle('hidden');
+    }
+
     // Tab switching
     function switchTab(tabName) {
       document.querySelectorAll('.tab-button').forEach(btn => {
@@ -1584,6 +1755,9 @@ class AdminServer {
       }
       if (tabName === 'recommendations') {
         loadRecommendations();
+      }
+      if (tabName === 'data') {
+        loadRawContent();
       }
     }
 
@@ -1614,6 +1788,13 @@ class AdminServer {
         const users = await request('/api/users');
         knownUserIds = new Set(users.map(u => u.userId));
         const container = document.getElementById('users');
+        const headerSelect = document.getElementById('headerUserSelect');
+        if (headerSelect) {
+          headerSelect.innerHTML = users
+            .map(u => \`<option value="\${escapeHtml(u.userId)}">\${escapeHtml(u.userId)}</option>\`)
+            .join('');
+          headerSelect.value = currentUserId;
+        }
         if (!users.length) {
           container.innerHTML = '<div class="text-sm text-gray-500 px-1 py-2">暂无用户</div>';
           return users;
@@ -1744,7 +1925,7 @@ class AdminServer {
 
     async function deleteUser(encodedId) {
       const id = decodeURIComponent(encodedId);
-      if (!confirm(\`删除用户 \${id}？该用户的配置、登录态和运行记录都会删除。\`)) {
+      if (!confirm(\`删除用户 \${id}？该用户的配置、登录状态和运行记录都会删除。\`)) {
         return;
       }
 
@@ -1772,6 +1953,7 @@ class AdminServer {
     async function applyLoadedUser(id, data) {
       currentUserId = id;
       currentConfig = data;
+      currentProfile = null;
       document.getElementById('userId').value = id;
       document.getElementById('config').value = JSON.stringify(data, null, 2);
       latestRunStats = await loadLatestRunStats(id);
@@ -1779,9 +1961,11 @@ class AdminServer {
       updatePlatformStatus(data);
       loadConfigIntoForm(data);
       updateContentSourceFilter(data);
+      await loadEnvironmentDiagnostics();
 
       try {
         const profile = await request(\`/api/users/\${encodeURIComponent(id)}/profile\`);
+        currentProfile = profile;
         document.getElementById('configInterests').value = Array.isArray(profile.interests)
           ? profile.interests.join(', ')
           : profile.interests || '';
@@ -1790,11 +1974,14 @@ class AdminServer {
         document.getElementById('configSamplePosts').value = Array.isArray(profile.samplePosts)
           ? profile.samplePosts.join('\\n')
           : profile.samplePosts || '';
+        updateOverview(currentConfig);
       } catch (error) {
+        currentProfile = null;
         document.getElementById('configInterests').value = '';
         document.getElementById('configStyle').value = '';
         document.getElementById('configAudience').value = '';
         document.getElementById('configSamplePosts').value = '';
+        updateOverview(currentConfig);
       }
     }
 
@@ -1821,11 +2008,134 @@ class AdminServer {
       ].filter(Boolean).length;
       document.getElementById('connectionCount').textContent = \`\${connections}/4\`;
       document.getElementById('attentionCount').textContent = String(attentionIssues(config).length);
+      renderActivationChecklist(config);
       renderPlatformHealth(config);
       renderAiHealth(config);
+      renderEnvironmentHealth();
       renderRunOutcome(config);
       document.getElementById('lastRunSummary').textContent = buildRunSummary(latestRunStats);
       notifyRecoverableFailures();
+    }
+
+    function renderActivationChecklist(config) {
+      const container = document.getElementById('activationChecklist');
+      if (!container) return;
+
+      const enabledSources = platforms.filter(platform => config.sources?.[platform.id]?.enabled);
+      const loginPlatforms = enabledSources.filter(platform => platform.needsAuth === 'cookie');
+      const connectedLoginPlatforms = loginPlatforms.filter(platform => {
+        const hasAuth = Boolean(config.credentialStatus?.[\`\${platform.id}Cookie\`]);
+        const check = credentialCheck(config, platform.id);
+        return hasAuth && check?.status === 'valid';
+      });
+      const firstPendingLogin = loginPlatforms.find(platform => {
+        const hasAuth = Boolean(config.credentialStatus?.[\`\${platform.id}Cookie\`]);
+        const check = credentialCheck(config, platform.id);
+        return !hasAuth || check?.status !== 'valid';
+      });
+      const profileReady = profileHasContent(currentProfile);
+      const embeddingReady = credentialReady(config, 'embedding');
+      const deepseekReady = credentialReady(config, 'deepseek');
+      const aiReadyCount = [embeddingReady, deepseekReady].filter(Boolean).length;
+      const hasRun = Boolean(latestRunStats && Array.isArray(latestRunStats.aggregation));
+      const selected = latestRunStats?.filtering?.selected ?? latestRunStats?.result?.recommendations ?? 0;
+      const drafts = latestRunStats?.drafts?.drafts ?? 0;
+      const unresolvedIssues = attentionIssues(config);
+
+      const tasks = [
+        {
+          done: profileReady,
+          title: '确认创作方向',
+          description: profileReady ? '画像已保存，会按你的兴趣和语气筛选内容。' : '告诉 Spark 你关注什么、写给谁看。',
+          action: "openConfigSection('config-profile')",
+          actionLabel: profileReady ? '查看' : '去填写',
+        },
+        {
+          done: enabledSources.length > 0,
+          title: '选择灵感来源',
+          description: enabledSources.length ? \`已启用 \${enabledSources.length} 个平台。\` : '至少启用一个平台后才能抓内容。',
+          action: "switchTab('platforms')",
+          actionLabel: enabledSources.length ? '查看' : '去选择',
+        },
+        {
+          done: loginPlatforms.length === 0 || connectedLoginPlatforms.length === loginPlatforms.length,
+          title: '连接需要登录的平台',
+          description: loginPlatforms.length
+            ? \`已确认 \${connectedLoginPlatforms.length}/\${loginPlatforms.length} 个需要登录的平台。\`
+            : '当前启用的平台都不需要登录。',
+          action: firstPendingLogin ? \`switchTab('platforms'); selectPlatformCredential('\${firstPendingLogin.id}')\` : "switchTab('platforms')",
+          actionLabel: firstPendingLogin ? '去处理' : '查看',
+        },
+        {
+          done: embeddingReady && deepseekReady,
+          title: '接入 AI 能力',
+          description: aiReadyCount === 2 ? '内容智能筛选和 AI 自动写草稿都已接入。' : \`已接入 \${aiReadyCount}/2 项；没接入也能抓内容，但不会完整自动化。\`,
+          action: "openConfigSection('config-ai')",
+          actionLabel: aiReadyCount === 2 ? '查看' : (aiReadyCount ? '补齐' : '去接入'),
+        },
+        {
+          done: unresolvedIssues.length === 0,
+          title: '处理异常',
+          description: unresolvedIssues.length ? \`还有 \${unresolvedIssues.length} 个问题需要处理。\` : '当前没有需要处理的问题。',
+          action: unresolvedIssues[0]?.action || "switchTab('overview')",
+          actionLabel: unresolvedIssues.length ? '去处理' : '查看',
+        },
+        {
+          done: hasRun,
+          title: hasRun ? '查看推荐结果' : '跑一次看看结果',
+          description: hasRun ? \`上次筛出 \${selected} 条推荐，生成 \${drafts} 个草稿。\` : '首次运行后，这里会直接告诉你内容在哪看。',
+          action: hasRun ? "switchTab('recommendations'); loadRecommendations()" : 'runUser()',
+          actionLabel: hasRun ? '看推荐' : '立即运行',
+        },
+      ];
+      const completed = tasks.filter(task => task.done).length;
+      const percent = Math.round((completed / tasks.length) * 100);
+      const isReady = completed === tasks.length;
+
+      container.innerHTML = \`
+        <div class="rounded-xl border \${isReady ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'} p-5">
+          <div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div class="text-sm font-semibold \${isReady ? 'text-green-800' : 'text-amber-800'}">\${isReady ? 'Spark 已就绪' : '把 Spark 跑起来'}</div>
+              <div class="mt-1 text-xl font-bold text-gray-900">\${completed}/\${tasks.length} 项完成</div>
+              <div class="mt-2 h-2 w-full max-w-md overflow-hidden rounded-full bg-white/70">
+                <div class="h-full rounded-full \${isReady ? 'bg-green-500' : 'bg-amber-500'}" style="width: \${percent}%"></div>
+              </div>
+            </div>
+            <button data-action="run" onclick="runUser()" class="shrink-0 rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-blue-300">
+              立即运行
+            </button>
+          </div>
+          <div class="mt-5 grid grid-cols-1 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+            \${tasks.map(task => \`
+              <div class="rounded-lg border \${task.done ? 'border-green-100 bg-white' : 'border-amber-100 bg-white'} p-3">
+                <div class="flex items-center gap-2">
+                  <span class="h-2.5 w-2.5 rounded-full \${task.done ? 'bg-green-500' : 'bg-amber-500'}"></span>
+                  <span class="font-medium text-gray-900">\${escapeHtml(task.title)}</span>
+                </div>
+                <p class="mt-2 min-h-[40px] text-xs leading-5 text-gray-600">\${escapeHtml(task.description)}</p>
+                <button onclick="\${task.action}" class="mt-3 text-xs font-medium text-blue-700 hover:text-blue-900">\${escapeHtml(task.actionLabel)}</button>
+              </div>
+            \`).join('')}
+          </div>
+        </div>
+      \`;
+    }
+
+    function profileHasContent(profile) {
+      if (!profile) return false;
+      const textFields = [profile.bio, profile.style, profile.audience];
+      const listFields = [profile.interests, profile.topics, profile.samplePosts];
+      return textFields.some(value => String(value || '').trim().length > 0)
+        || listFields.some(value => Array.isArray(value) ? value.length > 0 : String(value || '').trim().length > 0);
+    }
+
+    function credentialReady(config, kind) {
+      const hasKey = kind === 'embedding'
+        ? Boolean(config.credentialStatus?.embeddingApiKey)
+        : Boolean(config.credentialStatus?.deepseekApiKey);
+      const check = credentialCheck(config, kind);
+      return hasKey && check?.status !== 'invalid';
     }
 
     function renderPlatformHealth(config) {
@@ -1853,6 +2163,7 @@ class AdminServer {
                   <span class="font-medium text-gray-900 truncate">\${platform.name}</span>
                 </div>
                 <div class="mt-1 text-xs \${health.text}">\${health.message}</div>
+                \${strictProbeBadge(platform, hasAuth, check)}
               </div>
               \${health.action ? \`<button onclick="\${health.action}" class="shrink-0 text-xs font-medium text-blue-700 hover:text-blue-900">\${health.actionLabel || '处理'}</button>\` : ''}
             </div>
@@ -1866,8 +2177,8 @@ class AdminServer {
       if (!container) return;
 
       const items = [
-        aiHealth('embedding', '内容筛选', '负责相似度匹配和画像向量'),
-        aiHealth('deepseek', '内容创作', '负责推荐精排和草稿生成'),
+        aiHealth('embedding', '内容智能筛选', '从抓到的内容里挑出最可能值得看的'),
+        aiHealth('deepseek', 'AI 自动写草稿', '为推荐内容生成短、中、长三种草稿'),
       ];
 
       container.innerHTML = items.map(item => \`
@@ -1929,7 +2240,7 @@ class AdminServer {
             bg: 'bg-red-50',
             border: 'border-red-100',
             text: 'text-red-700',
-            message: check.message || 'API Key 不可用',
+            message: check.message || '密钥不可用',
             canValidate: true,
           };
         }
@@ -1947,6 +2258,37 @@ class AdminServer {
       }
     }
 
+    async function loadEnvironmentDiagnostics() {
+      try {
+        environmentStatus = await request('/api/diagnostics/environment');
+      } catch (error) {
+        environmentStatus = null;
+        console.error('Failed to load environment diagnostics:', error);
+      }
+      renderEnvironmentHealth();
+    }
+
+    function renderEnvironmentHealth() {
+      const container = document.getElementById('environmentHealthGrid');
+      if (!container) return;
+      const items = environmentStatus
+        ? [
+          ['浏览器', environmentStatus.browser],
+          ['凭证保护', environmentStatus.credentialStorage],
+          ['后台抓取', environmentStatus.backgroundScraping],
+        ]
+        : [['本机环境', { ok: false, message: '等待检测' }]];
+      container.innerHTML = items.map(([label, item]) => \`
+        <div class="rounded-lg border \${item.ok ? 'border-green-100 bg-green-50' : 'border-amber-100 bg-amber-50'} p-3">
+          <div class="flex items-center gap-2">
+            <span class="h-2.5 w-2.5 rounded-full \${item.ok ? 'bg-green-500' : 'bg-amber-500'}"></span>
+            <span class="font-medium text-gray-900">\${label}</span>
+          </div>
+          <div class="mt-1 text-xs \${item.ok ? 'text-green-700' : 'text-amber-700'}">\${escapeHtml(item.message)}</div>
+        </div>
+      \`).join('');
+    }
+
     function renderRunOutcome(config) {
       const panel = document.getElementById('runOutcomeCard');
       if (!panel) return;
@@ -1961,7 +2303,7 @@ class AdminServer {
               <div class="font-semibold text-gray-900">还没有运行结果</div>
               <div class="mt-1 text-sm text-gray-600">点击“立即运行”后，这里会显示抓取数量、推荐数量、草稿数量和需要处理的问题。</div>
             </div>
-            <button onclick="runUser()" class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">立即运行</button>
+            <button data-action="run" onclick="runUser()" class="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-blue-300">立即运行</button>
           </div>
         \`;
         return;
@@ -1978,7 +2320,7 @@ class AdminServer {
           </div>
           <div class="flex shrink-0 gap-2">
             <button onclick="switchTab('recommendations'); loadRecommendations()" class="rounded-md bg-white px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">看推荐</button>
-            <button onclick="runUser()" class="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700">重跑</button>
+            <button data-action="run" onclick="runUser()" class="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-blue-300">重跑</button>
           </div>
         </div>
         \${issues.length ? \`
@@ -2003,10 +2345,17 @@ class AdminServer {
         seen.add(key);
         issues.push(issue);
       };
+      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const failedSources = new Set(
+        aggregation
+          .filter(item => Number(item.errors || 0) > 0)
+          .map(item => item.source)
+      );
 
       platforms.forEach(platform => {
         const enabled = Boolean(config.sources?.[platform.id]?.enabled);
         if (!enabled) return;
+        if (failedSources.has(platform.id)) return;
 
         if (platform.needsAuth === 'cookie') {
           const hasAuth = Boolean(config.credentialStatus?.[\`\${platform.id}Cookie\`]);
@@ -2028,15 +2377,14 @@ class AdminServer {
           } else if (check?.status !== 'valid') {
             add({
               key: \`\${platform.id}:unknown-auth\`,
-              message: \`\${platform.name} 登录态未验证\`,
+              message: \`\${platform.name} 登录状态待检查\`,
               action: \`validatePlatformCredential('\${platform.id}')\`,
-              actionLabel: '验证',
+              actionLabel: '检查连接',
             });
           }
         }
       });
 
-      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
       aggregation
         .filter(item => Number(item.errors || 0) > 0)
         .forEach(item => {
@@ -2048,33 +2396,33 @@ class AdminServer {
             key: \`\${item.source}:run:\${item.failureType || 'failed'}\`,
             message: item.userMessage || \`\${name} 最近一次抓取失败\`,
             action: (auth || captcha) && platform?.needsAuth === 'cookie' ? \`launchLogin('\${item.source}')\` : 'runUser()',
-            actionLabel: auth ? '重新登录' : captcha ? '处理验证' : '重跑',
+            actionLabel: auth || captcha ? '去处理' : '重跑',
           });
         });
 
       [
-        ['embedding', '内容筛选', config.credentialStatus?.embeddingApiKey],
-        ['deepseek', '内容创作', config.credentialStatus?.deepseekApiKey],
+        ['embedding', '内容智能筛选', config.credentialStatus?.embeddingApiKey],
+        ['deepseek', 'AI 自动写草稿', config.credentialStatus?.deepseekApiKey],
       ].forEach(([kind, label, hasKey]) => {
         const check = credentialCheck(config, kind);
         if (!hasKey) {
           add({
             key: \`\${kind}:missing\`,
-            message: \`\${label} API Key 未配置\`,
+            message: \`\${label}密钥未配置\`,
             action: "switchTab('config')",
             actionLabel: '去配置',
           });
         } else if (check?.status === 'invalid') {
           add({
             key: \`\${kind}:invalid\`,
-            message: check.message || \`\${label} API Key 不可用\`,
+            message: check.message || \`\${label}密钥不可用\`,
             action: \`validateAiCredential('\${kind}')\`,
             actionLabel: '验证',
           });
         } else if (check?.status !== 'valid') {
           add({
             key: \`\${kind}:unknown\`,
-            message: \`\${label} API Key 未验证\`,
+            message: \`\${label}密钥未验证\`,
             action: \`validateAiCredential('\${kind}')\`,
             actionLabel: '验证',
           });
@@ -2113,7 +2461,7 @@ class AdminServer {
           bg: 'bg-red-50',
           border: 'border-red-100',
           text: 'text-red-700',
-          message: check.message || '登录态失效，需要重新登录',
+          message: check.message || '登录状态失效，需要重新登录',
           action: \`switchTab('platforms'); selectPlatformCredential('\${platform.id}')\`,
           actionLabel: '重新登录',
         };
@@ -2126,9 +2474,9 @@ class AdminServer {
           bg: needsValidation ? 'bg-yellow-50' : 'bg-blue-50',
           border: needsValidation ? 'border-yellow-100' : 'border-blue-100',
           text: needsValidation ? 'text-yellow-700' : 'text-blue-700',
-          message: needsValidation ? '登录态未验证' : '等待首次运行',
+          message: needsValidation ? '登录状态待检查' : '等待首次运行',
           action: needsValidation ? \`switchTab('platforms'); selectPlatformCredential('\${platform.id}')\` : '',
-          actionLabel: '去验证',
+          actionLabel: '检查连接',
         };
       }
 
@@ -2142,9 +2490,9 @@ class AdminServer {
           bg: isPlatformChanged ? 'bg-yellow-50' : 'bg-red-50',
           border: isPlatformChanged ? 'border-yellow-100' : 'border-red-100',
           text: isPlatformChanged ? 'text-yellow-700' : 'text-red-700',
-          message: stat.userMessage || (needsLogin ? '登录态失效，需要重新登录' : '抓取失败，稍后会自动重试'),
+          message: stat.userMessage || (needsLogin ? '登录状态失效，需要重新登录' : '抓取失败，稍后会自动重试'),
           action: needsLogin || needsCaptcha ? \`launchLogin('\${platform.id}')\` : '',
-          actionLabel: stat.actionLabel || (needsLogin ? '重新登录' : needsCaptcha ? '处理验证' : '处理'),
+          actionLabel: needsLogin || needsCaptcha ? '去处理' : (stat.actionLabel || '处理'),
         };
       }
 
@@ -2259,7 +2607,7 @@ class AdminServer {
 
     function renderAiCredentialStatus(kind, config) {
       const elementId = kind === 'embedding' ? 'configEmbeddingStatus' : 'configDeepseekStatus';
-      const label = kind === 'embedding' ? '内容筛选' : '内容创作';
+      const label = kind === 'embedding' ? '内容智能筛选' : 'AI 自动写草稿';
       const hasKey = kind === 'embedding'
         ? Boolean(config.credentialStatus?.embeddingApiKey)
         : Boolean(config.credentialStatus?.deepseekApiKey);
@@ -2268,16 +2616,16 @@ class AdminServer {
       if (!element) return;
 
       if (!hasKey) {
-        element.textContent = check?.status === 'invalid' ? check.message : \`\${label} API Key 未配置\`;
+        element.textContent = check?.status === 'invalid' ? check.message : \`\${label}密钥未配置\`;
         element.className = 'mt-1 text-xs text-gray-500';
       } else if (check?.status === 'valid') {
-        element.textContent = check.message || \`\${label} API Key 可用\`;
+        element.textContent = check.message || \`\${label}密钥可用\`;
         element.className = 'mt-1 text-xs text-green-700';
       } else if (check?.status === 'invalid') {
-        element.textContent = check.message || \`\${label} API Key 不可用\`;
+        element.textContent = check.message || \`\${label}密钥不可用\`;
         element.className = 'mt-1 text-xs text-red-700';
       } else {
-        element.textContent = check?.message || \`\${label} API Key 已保存，建议验证一次\`;
+        element.textContent = check?.message || \`\${label}密钥已保存，建议验证一次\`;
         element.className = 'mt-1 text-xs text-yellow-700';
       }
     }
@@ -2293,7 +2641,7 @@ class AdminServer {
 
       if (platform.needsAuth === 'cookie') {
         if (check?.status === 'valid') {
-          return '<span class="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800 rounded">可用</span>';
+          return \`<span class="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800 rounded">\${usesStrictProbe(platform) ? '连接正常' : '可用'}</span>\`;
         }
         if (check?.status === 'invalid') {
           return '<span class="px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 rounded">登录失效</span>';
@@ -2301,10 +2649,25 @@ class AdminServer {
         if (check?.status === 'checking') {
           return '<span class="px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-800 rounded">验证中</span>';
         }
-        return '<span class="px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded">未验证</span>';
+        return '<span class="px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded">待检查</span>';
       }
 
       return '<span class="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800 rounded">可用</span>';
+    }
+
+    function usesStrictProbe(platform) {
+      return platform.id === 'douyin' || platform.id === 'xiaohongshu';
+    }
+
+    function strictProbeBadge(platform, hasAuth, check) {
+      if (!usesStrictProbe(platform) || !hasAuth) return '';
+      if (check?.status === 'valid') {
+        return '<div class="mt-1 text-[11px] text-green-700">连接检查：通过</div>';
+      }
+      if (check?.status === 'invalid') {
+        return '<div class="mt-1 text-[11px] text-red-700">连接检查：登录失效</div>';
+      }
+      return '<div class="mt-1 text-[11px] text-yellow-700">连接检查：等待检查</div>';
     }
 
     function selectPlatformCredential(platformId) {
@@ -2321,45 +2684,53 @@ class AdminServer {
       }
 
       const hasAuth = Boolean(config.credentialStatus?.[\`\${platform.id}Cookie\`]);
-      const checkMeta = credentialCheckMeta(hasAuth, credentialCheck(config, platform.id));
+      const checkMeta = credentialCheckMeta(platform, hasAuth, credentialCheck(config, platform.id));
       panel.classList.remove('hidden');
       panel.innerHTML = \`
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center">
             <div class="w-8 h-8 \${platform.color} rounded-md flex items-center justify-center text-white font-bold text-xs">\${platform.icon}</div>
             <div class="ml-3">
-              <h3 class="font-semibold text-gray-900">\${platform.name} 登录配置</h3>
-              <p class="text-xs text-gray-500">仅本地部署可用，登录窗口最多等待 5 分钟，登录态保存在本机数据目录</p>
+              <h3 class="font-semibold text-gray-900">\${platform.name} 连接</h3>
+              <p class="text-xs text-gray-500">会在你的电脑上打开登录窗口，正常登录即可；登录状态只保存在本机。</p>
+              \${usesStrictProbe(platform) ? '<p class="mt-1 text-xs text-blue-700">检查连接会访问真实搜索接口，确认登录状态是否还能抓取内容。</p>' : ''}
             </div>
           </div>
           <span class="px-2 py-1 text-xs font-medium rounded \${checkMeta.className}">\${checkMeta.label}</span>
         </div>
         <div class="mb-3 text-xs \${checkMeta.textClass}">\${checkMeta.message}</div>
-        <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto_auto] gap-2">
-          <input
-            id="\${platform.id}Cookie"
-            type="text"
-            placeholder="粘贴 \${platform.name} Cookie"
-            class="px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-          <button onclick="saveCookie('\${platform.id}')" class="bg-gray-600 text-white px-4 py-2 text-sm rounded-md hover:bg-gray-700 transition">
-            保存 Cookie
-          </button>
-          <button onclick="launchLogin('\${platform.id}')" class="bg-blue-600 text-white px-4 py-2 text-sm rounded-md hover:bg-blue-700 transition">
-            本地辅助登录
-          </button>
-          <button onclick="validatePlatformCredential('\${platform.id}')" class="bg-emerald-600 text-white px-4 py-2 text-sm rounded-md hover:bg-emerald-700 transition \${hasAuth ? '' : 'opacity-50 cursor-not-allowed'}" \${hasAuth ? '' : 'disabled'}>
-            验证登录
-          </button>
+        <div class="space-y-3">
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <button onclick="launchLogin('\${platform.id}')" class="bg-blue-600 text-white px-4 py-2 text-sm rounded-md hover:bg-blue-700 transition">
+              在浏览器中登录
+            </button>
+            <button onclick="validatePlatformCredential('\${platform.id}')" class="bg-emerald-600 text-white px-4 py-2 text-sm rounded-md hover:bg-emerald-700 transition \${hasAuth ? '' : 'opacity-50 cursor-not-allowed'}" \${hasAuth ? '' : 'disabled'}>
+              检查连接
+            </button>
+          </div>
+          <details class="rounded-md border border-gray-200 bg-white p-3">
+            <summary class="text-xs font-medium text-gray-600">手动粘贴 Cookie（高级）</summary>
+            <div class="mt-3 grid grid-cols-1 gap-2 lg:grid-cols-[1fr_auto]">
+              <input
+                id="\${platform.id}Cookie"
+                type="text"
+                placeholder="粘贴 \${platform.name} Cookie"
+                class="px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+              <button onclick="saveCookie('\${platform.id}')" class="bg-gray-600 text-white px-4 py-2 text-sm rounded-md hover:bg-gray-700 transition">
+                保存 Cookie
+              </button>
+            </div>
+          </details>
         </div>
       \`;
     }
 
-    function credentialCheckMeta(hasAuth, check) {
+    function credentialCheckMeta(platform, hasAuth, check) {
       if (!hasAuth) {
         return {
           label: '未连接',
-          message: '还没有保存登录态，请先登录或粘贴 Cookie。',
+          message: '还没有连接，请先在浏览器中登录。',
           className: 'bg-yellow-100 text-yellow-800',
           textClass: 'text-yellow-700',
         };
@@ -2367,8 +2738,8 @@ class AdminServer {
 
       if (check?.status === 'valid') {
         return {
-          label: '可用',
-          message: check.message || '登录态已验证可用。',
+          label: usesStrictProbe(platform) ? '连接正常' : '可用',
+          message: check.message || '登录状态已确认可用。',
           className: 'bg-green-100 text-green-800',
           textClass: 'text-green-700',
         };
@@ -2386,7 +2757,7 @@ class AdminServer {
       if (check?.status === 'checking') {
         return {
           label: '验证中',
-          message: '正在验证登录态是否可用。',
+          message: '正在检查登录状态是否可用。',
           className: 'bg-blue-100 text-blue-800',
           textClass: 'text-blue-700',
         };
@@ -2394,7 +2765,7 @@ class AdminServer {
 
       return {
         label: '未验证',
-        message: check?.message || '已保存 Cookie，但还没有验证是否可用。',
+        message: check?.message || '已保存登录状态，建议检查一次。',
         className: 'bg-yellow-100 text-yellow-800',
         textClass: 'text-yellow-700',
       };
@@ -2421,6 +2792,7 @@ class AdminServer {
 
     // Save platform configuration
     async function savePlatformConfig() {
+      setActionBusy('save-platforms', true, '保存中...');
       try {
         const id = currentUserId;
         const data = await request(\`/api/users/\${encodeURIComponent(id)}\`, {
@@ -2434,6 +2806,8 @@ class AdminServer {
         showToast('平台配置保存成功');
       } catch (error) {
         console.error('Failed to save platform config:', error);
+      } finally {
+        setActionBusy('save-platforms', false);
       }
     }
 
@@ -2469,13 +2843,13 @@ class AdminServer {
       embeddingApiKeyInput.value = '';
       embeddingApiKeyInput.placeholder = config.credentialStatus?.embeddingApiKey
         ? '已配置，留空保持不变'
-        : '阿里云百炼 API Key';
+        : '粘贴内容智能筛选密钥（阿里云百炼）';
       renderAiCredentialStatus('embedding', config);
       const deepseekApiKeyInput = document.getElementById('configDeepseekApiKey');
       deepseekApiKeyInput.value = '';
       deepseekApiKeyInput.placeholder = config.credentialStatus?.deepseekApiKey
         ? '已配置，留空保持不变'
-        : 'DeepSeek API Key';
+        : '粘贴 AI 自动写草稿密钥（DeepSeek）';
       renderAiCredentialStatus('deepseek', config);
 
       // Sources
@@ -2517,6 +2891,7 @@ class AdminServer {
 
     // Save config from form
     async function saveUserFromForm() {
+      setActionBusy('save-config', true, '保存中...');
       try {
         const id = currentUserId;
 
@@ -2610,6 +2985,7 @@ class AdminServer {
             method: 'PUT',
             body: JSON.stringify(profilePayload)
           });
+          currentProfile = profilePayload;
         }
 
         const data = await request(\`/api/users/\${encodeURIComponent(id)}\`, {
@@ -2624,6 +3000,8 @@ class AdminServer {
       } catch (error) {
         console.error('Failed to save user:', error);
         showToast('保存失败: ' + error.message, 'error');
+      } finally {
+        setActionBusy('save-config', false);
       }
     }
 
@@ -2675,7 +3053,7 @@ class AdminServer {
           'xiaohongshu': '小红书',
           'weibo': '微博'
         };
-        showToast(\`\${platformNames[platform] || platform} Cookie 已保存，请验证登录\`);
+        showToast(\`\${platformNames[platform] || platform} Cookie 已保存，请检查连接\`);
       } catch (error) {
         console.error('Failed to save cookie:', error);
       }
@@ -2683,13 +3061,15 @@ class AdminServer {
 
     // Launch login window
     async function launchLogin(platform, options = {}) {
+      const mode = options.mode || 'normal';
       try {
         const id = currentUserId;
+        openLoginProgress(platform, mode);
         showToast('正在打开登录窗口，请在浏览器中完成登录...', 'success');
 
         const data = await request(\`/api/users/\${encodeURIComponent(id)}/login/\${platform}\`, {
           method: 'POST',
-          body: JSON.stringify({ mode: options.mode || 'normal' })
+          body: JSON.stringify({ mode })
         });
 
         currentConfig = data;
@@ -2704,13 +3084,46 @@ class AdminServer {
           'xiaohongshu': '小红书',
           'weibo': '微博'
         };
-        showToast(\`\${platformNames[platform] || platform} 登录成功，请验证登录\`);
+        showToast(\`\${platformNames[platform] || platform} 登录成功，请检查连接\`);
         return true;
       } catch (error) {
         console.error('Failed to launch login:', error);
         showToast('登录失败: ' + error.message, 'error');
         return false;
+      } finally {
+        closeLoginProgress();
       }
+    }
+
+    function openLoginProgress(platform, mode) {
+      const modal = document.getElementById('loginProgressModal');
+      const platformName = platforms.find(item => item.id === platform)?.name || platform;
+      const action = mode === 'captcha' ? '完成验证码或滑块验证' : '完成登录或扫码';
+      document.getElementById('loginProgressTitle').textContent = \`\${platformName}：请\${action}\`;
+      document.getElementById('loginProgressMessage').textContent = mode === 'captcha'
+        ? '已经为你打开验证页面。请在新窗口中完成验证码或滑块验证，窗口会在成功后自动关闭。'
+        : '已经为你打开登录页面。请在新窗口中完成扫码、手机号或账号密码登录，窗口会在成功后自动关闭。';
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      const startedAt = Date.now();
+      updateLoginCountdown(startedAt);
+      clearInterval(loginCountdownTimer);
+      loginCountdownTimer = setInterval(() => updateLoginCountdown(startedAt), 1000);
+    }
+
+    function updateLoginCountdown(startedAt) {
+      const remaining = Math.max(0, 5 * 60 - Math.floor((Date.now() - startedAt) / 1000));
+      const minutes = String(Math.floor(remaining / 60)).padStart(2, '0');
+      const seconds = String(remaining % 60).padStart(2, '0');
+      document.getElementById('loginProgressCountdown').textContent = \`\${minutes}:\${seconds}\`;
+    }
+
+    function closeLoginProgress() {
+      clearInterval(loginCountdownTimer);
+      loginCountdownTimer = null;
+      const modal = document.getElementById('loginProgressModal');
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
     }
 
     async function validateAiCredential(kind, silent = false) {
@@ -2719,7 +3132,7 @@ class AdminServer {
         currentConfig.credentialChecks ||= {};
         currentConfig.credentialChecks[kind] = {
           status: 'unknown',
-          message: '正在验证 API Key 是否可用。',
+          message: '正在验证密钥是否可用。',
           checkedAt: new Date().toISOString()
         };
         renderAiCredentialStatus(kind, currentConfig);
@@ -2736,9 +3149,9 @@ class AdminServer {
         const validation = result.validation || currentConfig.credentialChecks?.[kind];
         if (!silent) {
           if (validation?.status === 'valid') {
-            showToast(validation.message || 'API Key 可用');
+            showToast(validation.message || '密钥可用');
           } else {
-            showToast(validation?.message || 'API Key 不可用', 'error');
+            showToast(validation?.message || '密钥不可用', 'error');
           }
         }
       } catch (error) {
@@ -2749,8 +3162,8 @@ class AdminServer {
     async function clearCredential(kind) {
       try {
         const labels = {
-          embedding: '内容筛选 API Key',
-          deepseek: '内容创作 API Key'
+          embedding: '内容智能筛选密钥',
+          deepseek: 'AI 自动写草稿密钥'
         };
         if (!confirm(\`清空 \${labels[kind] || kind}？\`)) {
           return;
@@ -2776,7 +3189,7 @@ class AdminServer {
         currentConfig.credentialChecks ||= {};
         currentConfig.credentialChecks[platform] = {
           status: 'checking',
-          message: '正在验证登录态是否可用。',
+          message: '正在检查登录状态是否可用。',
           checkedAt: new Date().toISOString()
         };
         updatePlatformStatus(currentConfig);
@@ -2795,11 +3208,11 @@ class AdminServer {
         const validation = result.validation || currentConfig.credentialChecks?.[platform];
         if (!silent) {
           if (validation?.status === 'valid') {
-            showToast(validation.message || '登录态可用');
+            showToast(validation.message || '登录状态可用');
           } else if (validation?.status === 'invalid') {
-            showToast(validation.message || '登录态失效', 'error');
+            showToast(validation.message || '登录状态失效', 'error');
           } else {
-            showToast(validation?.message || '登录态未验证', 'error');
+            showToast(validation?.message || '登录状态未检查', 'error');
           }
         }
       } catch (error) {
@@ -2809,26 +3222,36 @@ class AdminServer {
 
     async function diagnoseSystem() {
       if (!currentConfig || !currentUserId) return;
-      showToast('开始诊断，请稍等');
-      const cookiePlatforms = platforms.filter(platform =>
-        platform.needsAuth === 'cookie' &&
-        currentConfig.sources?.[platform.id]?.enabled &&
-        currentConfig.credentialStatus?.[\`\${platform.id}Cookie\`]
-      );
-      for (const platform of cookiePlatforms) {
-        await validatePlatformCredential(platform.id, true);
+      setActionBusy('diagnose', true, '诊断中...');
+      setRuntimeStatus('warning', '诊断中');
+      try {
+        showToast('开始诊断，请稍等');
+        await loadEnvironmentDiagnostics();
+        const cookiePlatforms = platforms.filter(platform =>
+          platform.needsAuth === 'cookie' &&
+          currentConfig.sources?.[platform.id]?.enabled &&
+          currentConfig.credentialStatus?.[\`\${platform.id}Cookie\`]
+        );
+        for (const platform of cookiePlatforms) {
+          await validatePlatformCredential(platform.id, true);
+        }
+        if (currentConfig.credentialStatus?.embeddingApiKey) {
+          await validateAiCredential('embedding', true);
+        }
+        if (currentConfig.credentialStatus?.deepseekApiKey) {
+          await validateAiCredential('deepseek', true);
+        }
+        showToast('诊断完成');
+      } finally {
+        setActionBusy('diagnose', false);
+        setRuntimeStatus('idle', '空闲');
       }
-      if (currentConfig.credentialStatus?.embeddingApiKey) {
-        await validateAiCredential('embedding', true);
-      }
-      if (currentConfig.credentialStatus?.deepseekApiKey) {
-        await validateAiCredential('deepseek', true);
-      }
-      showToast('诊断完成');
     }
 
     // Run user
     async function runUser(options = {}) {
+      setActionBusy('run', true, '提交中...');
+      setRuntimeStatus('running', '运行中');
       try {
         if (!options.autoRetry) {
           autoRecoveryAttempts = 0;
@@ -2848,6 +3271,9 @@ class AdminServer {
         setTimeout(loadRecommendations, 500);
       } catch (error) {
         console.error('Failed to run user:', error);
+        setRuntimeStatus('error', '提交失败');
+      } finally {
+        setActionBusy('run', false);
       }
     }
 
@@ -2875,6 +3301,7 @@ class AdminServer {
 
     // Test push
     async function testPush() {
+      setActionBusy('test-push', true, '测试中...');
       try {
         const id = currentUserId;
         document.getElementById('status').textContent = '正在测试...';
@@ -2883,6 +3310,8 @@ class AdminServer {
         showToast('测试推送已发送');
       } catch (error) {
         console.error('Failed to test push:', error);
+      } finally {
+        setActionBusy('test-push', false);
       }
     }
 
@@ -2890,7 +3319,10 @@ class AdminServer {
     async function loadLogs() {
       try {
         const runs = await request(\`/api/runs?userId=\${encodeURIComponent(currentUserId)}&limit=20\`);
-        document.getElementById('logs').innerHTML = renderRuns(runs);
+        const filter = document.getElementById('logStatusFilter')?.value || '';
+        const visibleRuns = filter ? runs.filter(run => run.status === filter) : runs;
+        document.getElementById('logs').innerHTML = renderRuns(visibleRuns);
+        updateRuntimeStatusFromRun(runs[0]);
         if (runs.length) {
           latestRunStats = parseStats(runs[0].stats_json);
           if (currentConfig) {
@@ -2905,6 +3337,10 @@ class AdminServer {
         if (logsVisible && runs.some(run => run.status === 'running')) {
           logsRefreshTimer = setTimeout(loadLogs, 3000);
         }
+        if (document.getElementById('logAutoScroll')?.checked) {
+          const container = document.getElementById('logsContainer');
+          container.scrollTop = 0;
+        }
       } catch (error) {
         console.error('Failed to load logs:', error);
       }
@@ -2912,11 +3348,9 @@ class AdminServer {
 
     async function loadRecommendations() {
       try {
-        const sourceFilter = document.getElementById('contentSourceFilter')?.value || '';
-        const [items, runs, rawItems] = await Promise.all([
+        const [items, runs] = await Promise.all([
           request(\`/api/users/\${encodeURIComponent(currentUserId)}/recommendations?limit=30\`),
-          request(\`/api/runs?userId=\${encodeURIComponent(currentUserId)}&limit=1\`),
-          request(\`/api/users/\${encodeURIComponent(currentUserId)}/content?limit=50\${sourceFilter ? '&source=' + encodeURIComponent(sourceFilter) : ''}\`)
+          request(\`/api/runs?userId=\${encodeURIComponent(currentUserId)}&limit=1\`)
         ]);
         const latestRun = runs[0];
         const waitingForSubmittedRun = Date.now() < watchedRunDeadline &&
@@ -2927,9 +3361,9 @@ class AdminServer {
           latestRun.status !== 'running';
         latestRunId = latestRun?.id ?? latestRunId;
         latestRunStats = parseStats(latestRun?.stats_json);
+        updateRuntimeStatusFromRun(latestRun);
         renderRunProgress(latestRun);
         document.getElementById('recommendationsList').innerHTML = renderRecommendations(items, latestRun);
-        document.getElementById('rawContentList').innerHTML = renderRawContent(rawItems);
         if (currentConfig) {
           updateContentSourceFilter(currentConfig);
           updateOverview(currentConfig);
@@ -2950,6 +3384,16 @@ class AdminServer {
         }
       } catch (error) {
         console.error('Failed to load recommendations:', error);
+      }
+    }
+
+    async function loadRawContent() {
+      try {
+        const sourceFilter = document.getElementById('contentSourceFilter')?.value || '';
+        const items = await request(\`/api/users/\${encodeURIComponent(currentUserId)}/content?limit=80\${sourceFilter ? '&source=' + encodeURIComponent(sourceFilter) : ''}\`);
+        document.getElementById('rawContentList').innerHTML = renderRawContent(items);
+      } catch (error) {
+        console.error('Failed to load raw content:', error);
       }
     }
 
@@ -3096,7 +3540,7 @@ class AdminServer {
                 </div>
               \` : \`
                 <div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                  这条内容已保留，但没有生成草稿；接入内容创作 AI 后会生成短、中、长三个版本。
+                  这条内容已保留，但没有生成草稿；接入 AI 自动写草稿后会生成短、中、长三个版本。
                 </div>
               \`}
             </div>
@@ -3114,7 +3558,7 @@ class AdminServer {
       if (!items.length) {
         return \`
           <div class="rounded-lg border border-gray-200 bg-gray-50 p-5 text-center text-sm text-gray-600">
-            暂无已入库内容。验证登录只检查 Cookie，不会保存内容；点击“立即运行”后这里会显示抓取结果。
+            暂无已入库内容。检查连接只确认登录状态，不会保存内容；点击“立即运行”后这里会显示抓取结果。
           </div>
         \`;
       }
@@ -3372,6 +3816,9 @@ function main(): void {
   const db = new DatabaseManager(config.dbPath);
   db.initialize();
   const repository = new RuntimeConfigRepository(db);
+  if (process.env.CREDENTIAL_ENCRYPTION_KEY) {
+    logger.info(`Encrypted credentials for ${repository.migrateCredentialsToActiveCodec()} runtime users`);
+  }
   const queue = new RuntimeJobQueue(db);
   const port = Number(process.env.ADMIN_PORT || 8787);
   const host = process.env.ADMIN_HOST || '127.0.0.1';

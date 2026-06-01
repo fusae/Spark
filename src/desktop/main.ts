@@ -1,8 +1,9 @@
 import { app, BrowserWindow, Menu, dialog, shell } from 'electron';
 import electronUpdater from 'electron-updater';
 import { execFileSync, spawn, type ChildProcess } from 'child_process';
+import { randomBytes } from 'crypto';
 import { createServer, get as httpGet } from 'http';
-import { createWriteStream, mkdirSync } from 'fs';
+import { chmodSync, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 const { autoUpdater } = electronUpdater;
@@ -81,9 +82,22 @@ function runtimeEnv(port: number): NodeJS.ProcessEnv {
     env.DB_PATH ||= join(runtimeDir, 'scout.db');
     env.LOG_FILE ||= join(runtimeDir, 'app.log');
     env.LOCAL_LOGIN_PROFILE_DIR ||= join(runtimeDir, 'browser-profiles');
+    env.CREDENTIAL_ENCRYPTION_KEY ||= loadOrCreateCredentialKey(runtimeDir);
   }
 
   return env;
+}
+
+function loadOrCreateCredentialKey(runtimeDir: string): string {
+  const keyPath = join(runtimeDir, 'credential.key');
+  if (existsSync(keyPath)) {
+    return readFileSync(keyPath, 'utf8').trim();
+  }
+
+  const key = randomBytes(32).toString('hex');
+  writeFileSync(keyPath, `${key}\n`, { encoding: 'utf8', mode: 0o600 });
+  chmodSync(keyPath, 0o600);
+  return key;
 }
 
 function applySystemProxyEnv(env: NodeJS.ProcessEnv): void {
@@ -140,11 +154,15 @@ function proxyUrl(enabled: string | undefined, host: string | undefined, port: s
 }
 
 function serverScriptPath(): string {
-  return join(app.getAppPath(), 'dist', 'web', 'admin-server.js');
+  return join(appRootPath(), 'dist', 'web', 'admin-server.js');
 }
 
 function appIconPath(): string {
-  return join(app.getAppPath(), 'assets', 'spark-icon.png');
+  return join(appRootPath(), 'assets', 'spark-icon.png');
+}
+
+function appRootPath(): string {
+  return app.isPackaged ? app.getAppPath() : process.cwd();
 }
 
 function startAdminServer(port: number): void {
@@ -155,7 +173,7 @@ function startAdminServer(port: number): void {
     : env;
 
   adminProcess = spawn(command, [serverScriptPath()], {
-    cwd: app.isPackaged ? app.getPath('userData') : app.getAppPath(),
+    cwd: app.isPackaged ? app.getPath('userData') : appRootPath(),
     env: childEnv,
     stdio: app.isPackaged ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });

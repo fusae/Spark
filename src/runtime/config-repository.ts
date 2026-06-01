@@ -113,6 +113,21 @@ export class RuntimeConfigRepository {
     };
   }
 
+  migrateCredentialsToActiveCodec(): number {
+    let migrated = 0;
+    for (const user of this.db.listRuntimeUsers()) {
+      const config = this.get(user.user_id);
+      if (!config) {
+        continue;
+      }
+
+      this.save(config);
+      migrated += 1;
+    }
+
+    return migrated;
+  }
+
   private toSourceConfigJson(config: UserRuntimeConfig, source: SourceName): SourceConfigJson {
     switch (source) {
       case 'reddit':

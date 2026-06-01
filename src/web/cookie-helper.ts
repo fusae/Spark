@@ -2,6 +2,7 @@ import { mkdirSync } from 'fs';
 import { resolve } from 'path';
 import puppeteer, { Browser, Page } from 'puppeteer';
 import { logger } from '../utils/logger.js';
+import { probeCookieSession } from '../scrapers/session-probes.js';
 import { localBrowserLaunchOptions } from '../utils/browser-launcher.js';
 
 export type CookiePlatform = 'douyin' | 'xiaohongshu' | 'zhihu' | 'weibo';
@@ -109,7 +110,7 @@ export class CookieHelper {
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
 
       const currentCookies = await this.collectCookies(page, platform);
-      if (options.mode !== 'captcha' && await this.hasLoginState(page, platform, currentCookies)) {
+      if (options.mode !== 'captcha' && await this.hasVerifiedLoginState(page, platform, currentCookies)) {
         logger.info(`${platformConfig.label} existing login state found for user ${options.userId}`);
         return this.toCookieString(currentCookies);
       }
@@ -134,6 +135,7 @@ export class CookieHelper {
     const startedAt = Date.now();
     let checkCount = 0;
     let challengeSeen = false;
+    let lastStrictProbeAt = 0;
 
     while (Date.now() - startedAt < timeoutMs) {
       if (!browser.isConnected()) {
@@ -152,7 +154,12 @@ export class CookieHelper {
       challengeSeen ||= challengeVisible;
       const captchaWindowReady = mode !== 'captcha' || challengeSeen || Date.now() - startedAt >= 15_000;
       if (!challengeVisible && captchaWindowReady && await this.hasLoginState(page, platform, cookies)) {
-        return cookies;
+        if (Date.now() - lastStrictProbeAt >= 10_000) {
+          lastStrictProbeAt = Date.now();
+          if (await this.passesStrictSessionProbe(platform, cookies)) {
+            return cookies;
+          }
+        }
       }
 
       await this.sleep(2000);
@@ -220,6 +227,29 @@ export class CookieHelper {
     }
 
     return this.hasLoggedInSelector(page, platform);
+  }
+
+  private async hasVerifiedLoginState(
+    page: Page,
+    platform: CookiePlatform,
+    cookies: BrowserCookie[]
+  ): Promise<boolean> {
+    return await this.hasLoginState(page, platform, cookies) &&
+      await this.passesStrictSessionProbe(platform, cookies);
+  }
+
+  private async passesStrictSessionProbe(
+    platform: CookiePlatform,
+    cookies: BrowserCookie[]
+  ): Promise<boolean> {
+    const probe = await probeCookieSession(platform, this.toCookieString(cookies));
+    if (!probe || probe.ok) {
+      return true;
+    }
+
+    logger.info(`${platform} strict login probe failed: ${probe.failure?.userMessage || 'unknown failure'}`);
+    return probe.failure?.failureType !== 'auth_required' &&
+      probe.failure?.failureType !== 'captcha_required';
   }
 
   private async hasLoggedInSelector(page: Page, platform: CookiePlatform): Promise<boolean> {

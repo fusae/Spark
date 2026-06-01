@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/desktop/main.js",
   "scripts": {
-    "build": "tsc && npm run copy-files",
+    "build": "tsc && npm run build:css && npm run copy-files",
+    "build:css": "tailwindcss -i assets/tailwind-input.css -o assets/tailwind.css --content \"./src/web/**/*.{ts,html}\" --minify",
     "copy-files": "node scripts/copy-files.mjs",
     "dev": "tsx src/main.ts",
     "start": "node dist/main.js",
@@ -124,6 +125,7 @@
     "electron-builder": "^26.8.1",
     "eslint": "^8.56.0",
     "prettier": "^3.2.4",
+    "tailwindcss": "^3.4.17",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
   }

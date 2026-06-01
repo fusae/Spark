@@ -5,6 +5,7 @@ import type { ContentItem } from '../types/content.js';
 import type { UserRuntimeConfig } from '../types/runtime-config.js';
 import { classifyFailure, RecoverableFailure } from '../utils/failure.js';
 import { RateLimiter } from '../utils/rate-limiter.js';
+import { probeCookieSession } from '../scrapers/session-probes.js';
 import type { CookiePlatform } from './cookie-helper.js';
 
 export interface CredentialValidationResult {
@@ -24,6 +25,16 @@ export async function validateCredential(
   }
 
   try {
+    const probe = await probeCookieSession(platform, cookie);
+    if (
+      probe &&
+      !probe.ok &&
+      probe.failure &&
+      (probe.failure.failureType === 'auth_required' || probe.failure.failureType === 'captcha_required')
+    ) {
+      return result(platform, 'invalid', probe.failure.userMessage);
+    }
+
     const items = await withTimeout(runScraperValidation(platform, config), 90000);
     if (items.length > 0) {
       return result(platform, 'valid', `验证通过，抓到 ${items.length} 条内容`);

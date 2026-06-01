@@ -23,7 +23,7 @@ export function localBrowserLaunchOptions(
   };
 }
 
-function findBrowserExecutable(): string | undefined {
+export function findBrowserExecutable(): string | undefined {
   const configured = process.env.LOCAL_BROWSER_EXECUTABLE_PATH;
   if (configured && existsSync(configured)) {
     return configured;
