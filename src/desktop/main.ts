@@ -105,8 +105,14 @@ function applySystemProxyEnv(env: NodeJS.ProcessEnv): void {
     return;
   }
 
+  removeUnavailableLocalProxyEnv(env);
+
   const proxy = readMacSystemProxy();
   if (!proxy) {
+    return;
+  }
+
+  if (!proxy.endpoints.some((endpoint) => canConnectToProxyEndpoint(endpoint))) {
     return;
   }
 
@@ -118,7 +124,12 @@ function applySystemProxyEnv(env: NodeJS.ProcessEnv): void {
   env.NO_PROXY ||= env.no_proxy;
 }
 
-function readMacSystemProxy(): { httpProxy: string; httpsProxy: string } | null {
+interface ProxyEndpoint {
+  host: string;
+  port: string;
+}
+
+function readMacSystemProxy(): { httpProxy: string; httpsProxy: string; endpoints: ProxyEndpoint[] } | null {
   try {
     const output = execFileSync('/usr/sbin/scutil', ['--proxy'], {
       encoding: 'utf8',
@@ -132,25 +143,77 @@ function readMacSystemProxy(): { httpProxy: string; httpsProxy: string } | null 
         .map((match) => [match[1], match[2]])
     );
 
-    const httpProxy = proxyUrl(values.HTTPEnable, values.HTTPProxy, values.HTTPPort, 'http');
-    const httpsProxy = proxyUrl(values.HTTPSEnable, values.HTTPSProxy, values.HTTPSPort, 'http');
-    const socksProxy = proxyUrl(values.SOCKSEnable, values.SOCKSProxy, values.SOCKSPort, 'socks5');
+    const httpEndpoint = proxyEndpoint(values.HTTPEnable, values.HTTPProxy, values.HTTPPort);
+    const httpsEndpoint = proxyEndpoint(values.HTTPSEnable, values.HTTPSProxy, values.HTTPSPort);
+    const socksEndpoint = proxyEndpoint(values.SOCKSEnable, values.SOCKSProxy, values.SOCKSPort);
+    const httpProxy = proxyUrl(httpEndpoint, 'http');
+    const httpsProxy = proxyUrl(httpsEndpoint, 'http');
+    const socksProxy = proxyUrl(socksEndpoint, 'socks5');
     const fallback = httpProxy || socksProxy;
     const secureFallback = httpsProxy || fallback;
+    const endpoints = [httpEndpoint, httpsEndpoint, socksEndpoint].filter(
+      (endpoint): endpoint is ProxyEndpoint => Boolean(endpoint)
+    );
     return fallback && secureFallback
-      ? { httpProxy: fallback, httpsProxy: secureFallback }
+      ? { httpProxy: fallback, httpsProxy: secureFallback, endpoints }
       : null;
   } catch {
     return null;
   }
 }
 
-function proxyUrl(enabled: string | undefined, host: string | undefined, port: string | undefined, scheme: string): string {
+function proxyEndpoint(
+  enabled: string | undefined,
+  host: string | undefined,
+  port: string | undefined
+): ProxyEndpoint | null {
   if (enabled !== '1' || !host || !port) {
-    return '';
+    return null;
   }
 
-  return `${scheme}://${host}:${port}`;
+  return { host, port };
+}
+
+function proxyUrl(endpoint: ProxyEndpoint | null, scheme: string): string {
+  return endpoint ? `${scheme}://${endpoint.host}:${endpoint.port}` : '';
+}
+
+function removeUnavailableLocalProxyEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']) {
+    const endpoint = proxyEndpointFromUrl(env[key]);
+    if (endpoint && isLocalProxyHost(endpoint.host) && !canConnectToProxyEndpoint(endpoint)) {
+      delete env[key];
+    }
+  }
+}
+
+function proxyEndpointFromUrl(value: string | undefined): ProxyEndpoint | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname && parsed.port ? { host: parsed.hostname, port: parsed.port } : null;
+  } catch {
+    return null;
+  }
+}
+
+function isLocalProxyHost(host: string): boolean {
+  return ['127.0.0.1', 'localhost', '::1'].includes(host);
+}
+
+function canConnectToProxyEndpoint(endpoint: ProxyEndpoint): boolean {
+  try {
+    execFileSync('/usr/bin/nc', ['-z', '-G', '1', endpoint.host, endpoint.port], {
+      stdio: 'ignore',
+      timeout: 1500,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function serverScriptPath(): string {

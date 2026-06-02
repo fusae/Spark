@@ -1,5 +1,5 @@
-import { existsSync } from 'fs';
-import { resolve } from 'path';
+import { existsSync, rmSync } from 'fs';
+import { join, resolve } from 'path';
 import puppeteer, { Browser } from 'puppeteer';
 import { localBrowserLaunchOptions } from '../utils/browser-launcher.js';
 
@@ -30,7 +30,16 @@ export async function launchLocalBrowser(
   const release = await acquireProfile(profileDir);
 
   try {
-    const browser = await puppeteer.launch(localBrowserLaunchOptions(profileDir, headless));
+    let browser: Browser;
+    try {
+      browser = await puppeteer.launch(localBrowserLaunchOptions(profileDir, headless));
+    } catch (error) {
+      if (!isProfileLockError(error)) {
+        throw error;
+      }
+      cleanupSingletonFiles(profileDir);
+      browser = await puppeteer.launch(localBrowserLaunchOptions(profileDir, headless));
+    }
     const closeBrowser = browser.close.bind(browser);
     let released = false;
     const releaseOnce = (): void => {
@@ -75,4 +84,15 @@ async function acquireProfile(profileDir: string): Promise<() => void> {
 
 function safeFileName(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_') || 'local';
+}
+
+function isProfileLockError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /SingletonLock|ProcessSingleton|profile directory/i.test(message);
+}
+
+function cleanupSingletonFiles(profileDir: string): void {
+  for (const file of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    rmSync(join(profileDir, file), { force: true });
+  }
 }
