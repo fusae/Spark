@@ -108,6 +108,12 @@ export class ZhihuScraper extends BaseScraper {
       const needsLogin = await page
         .evaluate(() => /登录|注册|扫码登录/.test(document.body.innerText || ''))
         .catch(() => false);
+      const needsVerification = await page
+        .evaluate(() => {
+          const text = `${document.title}\n${location.href}\n${document.body.innerText || ''}`;
+          return /account\/unhuman|安全验证|系统监测到.*网络环境|开始验证|访问异常|verify|captcha/i.test(text);
+        })
+        .catch(() => false);
       const items = await page.evaluate(() => {
         const cards = Array.from(document.querySelectorAll('.SearchResult-Card, .List-item, .ContentItem'));
         return cards
@@ -143,6 +149,10 @@ export class ZhihuScraper extends BaseScraper {
 
       if (items.length === 0 && needsLogin) {
         throw new RecoverableFailure('auth_required', '知乎登录态失效，需要重新登录', true, '重新登录');
+      }
+
+      if (items.length === 0 && needsVerification) {
+        throw new RecoverableFailure('captcha_required', '知乎触发安全验证，需要在登录窗口完成验证后重试', true, '处理验证');
       }
 
       return items;

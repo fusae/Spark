@@ -54,6 +54,7 @@ const PLATFORM_CONFIGS: Record<CookiePlatform, PlatformLoginConfig> = {
   zhihu: {
     label: '知乎',
     url: 'https://www.zhihu.com/signin',
+    verificationUrl: 'https://www.zhihu.com/search?type=content&q=AI',
     cookieUrls: [
       'https://www.zhihu.com/',
       'https://www.zhihu.com/signin',
