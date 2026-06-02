@@ -5,7 +5,7 @@ import { retry, retryStrategies } from '../utils/retry.js';
 import { config } from '../config.js';
 import { hasLocalBrowserProfile, launchLocalBrowser } from './local-browser.js';
 import { RecoverableFailure } from '../utils/failure.js';
-import { asRecoverableFailure, probeCookieSession } from './session-probes.js';
+import { probeCookieSession } from './session-probes.js';
 import type { RateLimiter } from '../utils/rate-limiter.js';
 import type { DouyinSourceRuntimeConfig } from '../types/runtime-config.js';
 import type { Page } from 'puppeteer';
@@ -268,15 +268,21 @@ export class DouyinScraper extends BaseScraper {
 
       const response = await this.withTimeout(responsePromise, 30000, null);
       if (!response) {
+        const domItems = await this.extractBrowserSearchItems(page, keyword);
+        if (domItems.length > 0) {
+          logger.info(`Douyin browser DOM fallback collected ${domItems.length} items for "${keyword}"`);
+          return domItems;
+        }
+
         const pageState = await page
           .evaluate(() => ({
             text: document.body.innerText || '',
             hasCaptcha: Boolean(document.querySelector(
-              '[class*="captcha"], [class*="verify"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
+              '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
             )),
           }))
           .catch(() => ({ text: '', hasCaptcha: false }));
-        if (pageState.hasCaptcha || /验证码|安全验证|滑块|请完成验证|captcha|verify/i.test(pageState.text)) {
+        if (pageState.hasCaptcha || /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(pageState.text)) {
           throw new RecoverableFailure('captcha_required', '抖音触发滑块验证码或风控，需要在登录窗口完成验证后重试', true, '处理验证');
         }
         const needsLogin = /登录|扫码|手机号/.test(pageState.text);
@@ -311,13 +317,53 @@ export class DouyinScraper extends BaseScraper {
 
   private async ensureAuthenticatedSession(): Promise<void> {
     const probe = await this.preflight();
-    if (
-      !probe.ok &&
-      probe.failure &&
-      (probe.failure.failureType === 'auth_required' || probe.failure.failureType === 'captcha_required')
-    ) {
-      throw asRecoverableFailure(probe.failure);
+    if (!probe.ok && probe.failure) {
+      logger.warn(`Douyin session preflight warning: ${probe.failure.userMessage}; continuing with browser search validation`);
     }
+  }
+
+  private async extractBrowserSearchItems(page: Page, keyword: string): Promise<ContentItem[]> {
+    const rows = await page.evaluate(() => {
+      const seen = new Set<string>();
+      const output: Array<{ id: string; url: string; title: string }> = [];
+
+      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/video/"]'))) {
+        const url = anchor.href;
+        const id = url.match(/\/video\/(\d+)/)?.[1] || '';
+        if (!id || seen.has(id)) {
+          continue;
+        }
+
+        const card = anchor.closest('li, article, [class*="search-result"], [class*="card"], [class*="item"]');
+        const title = (
+          anchor.getAttribute('aria-label') ||
+          anchor.getAttribute('title') ||
+          anchor.textContent ||
+          card?.textContent ||
+          ''
+        ).replace(/\s+/g, ' ').trim();
+        if (!title) {
+          continue;
+        }
+
+        seen.add(id);
+        output.push({ id, url, title: title.slice(0, 280) });
+      }
+
+      return output;
+    });
+
+    return rows
+      .map((row) => ({
+        id: `douyin-search-${row.id}`,
+        source: 'douyin' as const,
+        title: `[抖音搜索:${keyword}] ${row.title}`,
+        content: row.title,
+        url: row.url,
+        publishedAt: new Date(),
+        collectedAt: new Date(),
+      }))
+      .filter((item) => this.validateItem(item));
   }
 
   private waitForBrowserSearchResponse(

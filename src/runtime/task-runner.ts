@@ -231,6 +231,24 @@ export class RuntimeTaskRunner {
       saved: totalSaved,
     });
 
+    if (sources && aggregation.every((stat) => stat.errors > 0)) {
+      this.logStage(runLogId, progress, '筛选', 'skipped', '补抓失败，跳过筛选');
+      this.logStage(runLogId, progress, '生成草稿', 'skipped', '补抓失败，跳过草稿生成');
+      this.logStage(runLogId, progress, '推送', 'skipped', '补抓失败，跳过推送');
+      throw new Error(`补抓失败：${aggregation.map((stat) => stat.source).join('、')}`);
+    }
+
+    if (sources && totalSaved === 0) {
+      this.logStage(runLogId, progress, '筛选', 'skipped', '补抓没有新增内容，跳过筛选');
+      this.logStage(runLogId, progress, '生成草稿', 'skipped', '补抓没有新增内容，跳过草稿生成');
+      this.logStage(runLogId, progress, '推送', 'skipped', '补抓没有新增内容，跳过推送');
+      return {
+        aggregation: this.formatAggregationStats(aggregation),
+        recommendations: 0,
+        pushed: 0,
+      };
+    }
+
     this.logStage(runLogId, progress, '画像', 'running', '读取或初始化账号画像');
     let profile = await profileManager.getProfile();
     if (!profile) {

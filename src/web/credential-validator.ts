@@ -27,6 +27,7 @@ export async function validateCredential(
   try {
     const probe = await probeCookieSession(platform, cookie);
     if (
+      platform !== 'douyin' &&
       probe &&
       !probe.ok &&
       probe.failure &&

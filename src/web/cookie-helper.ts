@@ -150,6 +150,10 @@ export class CookieHelper {
         logger.info(`[${platform} login check ${checkCount}] cookies: ${names}`);
       }
 
+      if (mode === 'captcha' && await this.hasUsableVerificationPage(page, platform, cookies)) {
+        return cookies;
+      }
+
       const challengeVisible = mode === 'captcha' && await this.hasCaptchaChallenge(page);
       challengeSeen ||= challengeVisible;
       const captchaWindowReady = mode !== 'captcha' || challengeSeen || Date.now() - startedAt >= 15_000;
@@ -187,8 +191,35 @@ export class CookieHelper {
   private async hasCaptchaChallenge(page: Page): Promise<boolean> {
     return page.evaluate(() => {
       const text = document.body.innerText || '';
-      return /验证码|安全验证|滑块|请完成验证|captcha|verify/i.test(text) ||
-        Boolean(document.querySelector('[class*="captcha"], [class*="verify"], iframe[src*="captcha"], iframe[src*="verify"]'));
+      return /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text) ||
+        Boolean(document.querySelector('[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"]'));
+    }).catch(() => false);
+  }
+
+  private async hasUsableVerificationPage(
+    page: Page,
+    platform: CookiePlatform,
+    cookies: BrowserCookie[]
+  ): Promise<boolean> {
+    if (platform !== 'douyin' || !this.hasRequiredCookies(cookies, platform)) {
+      return false;
+    }
+
+    return page.evaluate(() => {
+      if (!window.location.pathname.startsWith('/search/')) {
+        return false;
+      }
+
+      const text = document.body.innerText || '';
+      if (document.querySelector('a[href*="/video/"]')) {
+        return true;
+      }
+
+      if (/验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text)) {
+        return false;
+      }
+
+      return text.trim().length > 100;
     }).catch(() => false);
   }
 

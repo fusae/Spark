@@ -2033,6 +2033,9 @@ class AdminServer {
         const check = credentialCheck(config, platform.id);
         return !hasAuth || check?.status !== 'valid';
       });
+      const firstPendingFailure = firstPendingLogin
+        ? platformRecoveryFailure(firstPendingLogin.id, config)
+        : '';
       const profileReady = profileHasContent(currentProfile);
       const embeddingReady = credentialReady(config, 'embedding');
       const deepseekReady = credentialReady(config, 'deepseek');
@@ -2063,7 +2066,11 @@ class AdminServer {
           description: loginPlatforms.length
             ? \`已确认 \${connectedLoginPlatforms.length}/\${loginPlatforms.length} 个需要登录的平台。\`
             : '当前启用的平台都不需要登录。',
-          action: firstPendingLogin ? \`switchTab('platforms'); selectPlatformCredential('\${firstPendingLogin.id}')\` : "switchTab('platforms')",
+          action: firstPendingLogin
+            ? (firstPendingFailure
+              ? loginRecoveryAction(firstPendingLogin.id, firstPendingFailure)
+              : \`switchTab('platforms'); selectPlatformCredential('\${firstPendingLogin.id}')\`)
+            : "switchTab('platforms')",
           actionLabel: firstPendingLogin ? '去处理' : '查看',
         },
         {
@@ -2371,7 +2378,7 @@ class AdminServer {
             add({
               key: \`\${platform.id}:invalid-auth\`,
               message: \`\${platform.name} 登录失效\`,
-              action: \`launchLogin('\${platform.id}')\`,
+              action: loginRecoveryAction(platform.id, 'auth_required'),
               actionLabel: '重新登录',
             });
           } else if (check?.status !== 'valid') {
@@ -2395,7 +2402,9 @@ class AdminServer {
           add({
             key: \`\${item.source}:run:\${item.failureType || 'failed'}\`,
             message: item.userMessage || \`\${name} 最近一次抓取失败\`,
-            action: (auth || captcha) && platform?.needsAuth === 'cookie' ? \`launchLogin('\${item.source}')\` : 'runUser()',
+            action: (auth || captcha) && platform?.needsAuth === 'cookie'
+              ? loginRecoveryAction(item.source, item.failureType)
+              : 'runUser()',
             actionLabel: auth || captcha ? '去处理' : '重跑',
           });
         });
@@ -2462,7 +2471,7 @@ class AdminServer {
           border: 'border-red-100',
           text: 'text-red-700',
           message: check.message || '登录状态失效，需要重新登录',
-          action: \`switchTab('platforms'); selectPlatformCredential('\${platform.id}')\`,
+          action: loginRecoveryAction(platform.id, 'auth_required'),
           actionLabel: '重新登录',
         };
       }
@@ -2491,7 +2500,7 @@ class AdminServer {
           border: isPlatformChanged ? 'border-yellow-100' : 'border-red-100',
           text: isPlatformChanged ? 'text-yellow-700' : 'text-red-700',
           message: stat.userMessage || (needsLogin ? '登录状态失效，需要重新登录' : '抓取失败，稍后会自动重试'),
-          action: needsLogin || needsCaptcha ? \`launchLogin('\${platform.id}')\` : '',
+          action: needsLogin || needsCaptcha ? loginRecoveryAction(platform.id, failureType) : '',
           actionLabel: needsLogin || needsCaptcha ? '去处理' : (stat.actionLabel || '处理'),
         };
       }
@@ -2513,6 +2522,28 @@ class AdminServer {
         text: 'text-green-700',
         message: \`本次抓到 \${Number(stat.itemsCollected || 0)} 条\`,
       };
+    }
+
+    function loginRecoveryAction(platformId, failureType) {
+      const mode = failureType === 'captcha_required' ? 'captcha' : 'reauth';
+      return \`launchLogin('\${platformId}', { mode: '\${mode}', recoverSource: true })\`;
+    }
+
+    function platformRecoveryFailure(platformId, config = currentConfig) {
+      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const stat = aggregation.find(item => item.source === platformId && Number(item.errors || 0) > 0);
+      if (stat?.failureType === 'captcha_required' || stat?.failureType === 'auth_required') {
+        return stat.failureType;
+      }
+
+      const check = credentialCheck(config, platformId);
+      if (check?.status !== 'invalid') {
+        return '';
+      }
+
+      return /captcha|验证码|滑块|风控|安全验证|verify/i.test(check.message || '')
+        ? 'captcha_required'
+        : 'auth_required';
     }
 
     function buildRunSummary(stats) {
@@ -2685,6 +2716,13 @@ class AdminServer {
 
       const hasAuth = Boolean(config.credentialStatus?.[\`\${platform.id}Cookie\`]);
       const checkMeta = credentialCheckMeta(platform, hasAuth, credentialCheck(config, platform.id));
+      const recoveryFailure = platformRecoveryFailure(platform.id, config);
+      const loginAction = recoveryFailure
+        ? loginRecoveryAction(platform.id, recoveryFailure)
+        : \`launchLogin('\${platform.id}')\`;
+      const loginLabel = recoveryFailure === 'captcha_required'
+        ? '处理验证码'
+        : recoveryFailure === 'auth_required' ? '重新登录' : '在浏览器中登录';
       panel.classList.remove('hidden');
       panel.innerHTML = \`
         <div class="flex items-center justify-between mb-3">
@@ -2701,8 +2739,8 @@ class AdminServer {
         <div class="mb-3 text-xs \${checkMeta.textClass}">\${checkMeta.message}</div>
         <div class="space-y-3">
           <div class="flex flex-col gap-2 sm:flex-row">
-            <button onclick="launchLogin('\${platform.id}')" class="bg-blue-600 text-white px-4 py-2 text-sm rounded-md hover:bg-blue-700 transition">
-              在浏览器中登录
+            <button onclick="\${loginAction}" class="bg-blue-600 text-white px-4 py-2 text-sm rounded-md hover:bg-blue-700 transition">
+              \${loginLabel}
             </button>
             <button onclick="validatePlatformCredential('\${platform.id}')" class="bg-emerald-600 text-white px-4 py-2 text-sm rounded-md hover:bg-emerald-700 transition \${hasAuth ? '' : 'opacity-50 cursor-not-allowed'}" \${hasAuth ? '' : 'disabled'}>
               检查连接
@@ -3084,6 +3122,17 @@ class AdminServer {
           'xiaohongshu': '小红书',
           'weibo': '微博'
         };
+        if (options.recoverSource) {
+          const validation = await validatePlatformCredential(platform, true);
+          if (validation?.status !== 'valid') {
+            showToast(validation?.message || \`\${platformNames[platform] || platform} 仍未通过检查\`, 'error');
+            return false;
+          }
+          await runSources([platform]);
+          showToast(\`\${platformNames[platform] || platform} 已恢复，正在补抓\`);
+          return true;
+        }
+
         showToast(\`\${platformNames[platform] || platform} 登录成功，请检查连接\`);
         return true;
       } catch (error) {
@@ -3215,8 +3264,10 @@ class AdminServer {
             showToast(validation?.message || '登录状态未检查', 'error');
           }
         }
+        return validation;
       } catch (error) {
         console.error('Failed to validate credential:', error);
+        return null;
       }
     }
 
@@ -3421,7 +3472,8 @@ class AdminServer {
           showToast(\`\${platform.name} \${needsCaptcha ? '需要完成验证' : '需要重新登录'}，处理后会自动重跑\`, 'error');
           const loggedIn = await launchLogin(platform.id, { mode: needsCaptcha ? 'captcha' : 'reauth' });
           if (!loggedIn) continue;
-          await validatePlatformCredential(platform.id, true);
+          const validation = await validatePlatformCredential(platform.id, true);
+          if (validation?.status !== 'valid') continue;
           recoveredSources.push(platform.id);
         }
         if (recoveredSources.length > 0) {
