@@ -4,6 +4,7 @@ import puppeteer, { Browser } from 'puppeteer';
 import { localBrowserLaunchOptions } from '../utils/browser-launcher.js';
 
 type LocalBrowserPlatform = 'douyin' | 'xiaohongshu' | 'zhihu' | 'weibo';
+const profileQueues = new Map<string, Promise<void>>();
 
 export function getLocalBrowserProfileDir(
   platform: LocalBrowserPlatform,
@@ -22,14 +23,54 @@ export function hasLocalBrowserProfile(
 
 export async function launchLocalBrowser(
   platform: LocalBrowserPlatform,
-  userId?: string
+  userId?: string,
+  headless = process.env.LOCAL_SCRAPER_HEADLESS !== 'false'
 ): Promise<Browser> {
-  return puppeteer.launch(
-    localBrowserLaunchOptions(
-      getLocalBrowserProfileDir(platform, userId),
-      process.env.LOCAL_SCRAPER_HEADLESS !== 'false'
-    )
-  );
+  const profileDir = getLocalBrowserProfileDir(platform, userId);
+  const release = await acquireProfile(profileDir);
+
+  try {
+    const browser = await puppeteer.launch(localBrowserLaunchOptions(profileDir, headless));
+    const closeBrowser = browser.close.bind(browser);
+    let released = false;
+    const releaseOnce = (): void => {
+      if (!released) {
+        released = true;
+        release();
+      }
+    };
+
+    browser.close = async (): Promise<void> => {
+      try {
+        await closeBrowser();
+      } finally {
+        releaseOnce();
+      }
+    };
+    browser.once('disconnected', releaseOnce);
+    return browser;
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
+async function acquireProfile(profileDir: string): Promise<() => void> {
+  const previous = profileQueues.get(profileDir) || Promise.resolve();
+  let resolveCurrent!: () => void;
+  const current = new Promise<void>((resolveCurrentPromise) => {
+    resolveCurrent = resolveCurrentPromise;
+  });
+  const queued = previous.then(() => current);
+  profileQueues.set(profileDir, queued);
+  await previous;
+
+  return () => {
+    resolveCurrent();
+    if (profileQueues.get(profileDir) === queued) {
+      profileQueues.delete(profileDir);
+    }
+  };
 }
 
 function safeFileName(value: string): string {

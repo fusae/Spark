@@ -392,7 +392,7 @@ class AdminServer {
       sourceNames.filter((sourceName) => runtimeConfig?.sources[sourceName]?.enabled)
     );
     const selectedSource = sourceNames.includes(source as never) ? source : '';
-    return this.db.getRecentContent(Math.max(1, Math.min((limit || 50) * 3, 300)))
+    return this.db.getRecentContent(Math.max(1, Math.min((limit || 50) * 3, 300)), userId)
       .filter((item) => !selectedSource || item.source === selectedSource)
       .filter((item) => enabledSources.size === 0 || enabledSources.has(item.source as never))
       .slice(0, Math.max(1, Math.min(limit || 50, 100)))
@@ -3123,11 +3123,6 @@ class AdminServer {
           'weibo': '微博'
         };
         if (options.recoverSource) {
-          const validation = await validatePlatformCredential(platform, true);
-          if (validation?.status !== 'valid') {
-            showToast(validation?.message || \`\${platformNames[platform] || platform} 仍未通过检查\`, 'error');
-            return false;
-          }
           await runSources([platform]);
           showToast(\`\${platformNames[platform] || platform} 已恢复，正在补抓\`);
           return true;
@@ -3472,8 +3467,6 @@ class AdminServer {
           showToast(\`\${platform.name} \${needsCaptcha ? '需要完成验证' : '需要重新登录'}，处理后会自动重跑\`, 'error');
           const loggedIn = await launchLogin(platform.id, { mode: needsCaptcha ? 'captcha' : 'reauth' });
           if (!loggedIn) continue;
-          const validation = await validatePlatformCredential(platform.id, true);
-          if (validation?.status !== 'valid') continue;
           recoveredSources.push(platform.id);
         }
         if (recoveredSources.length > 0) {

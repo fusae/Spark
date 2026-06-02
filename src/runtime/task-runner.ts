@@ -183,7 +183,7 @@ export class RuntimeTaskRunner {
       aiConfig.embedding.model,
       configForUser.profilePath
     );
-    const filterEngine = new FilterEngine(embeddingClient, deepseekClient, this.db);
+    const filterEngine = new FilterEngine(embeddingClient, deepseekClient, this.db, configForUser.userId);
     const draftGenerator = new DraftGenerator(deepseekClient, 'deepseek-chat');
 
     this.logStage(runLogId, progress, '抓取', 'running', sources ? '开始补抓失败平台' : '开始抓取所有已启用平台', {
@@ -230,6 +230,13 @@ export class RuntimeTaskRunner {
       duplicates: totalDeduped,
       saved: totalSaved,
     });
+
+    if (!sources && aggregation.length > 0 && aggregation.every((stat) => stat.errors > 0)) {
+      this.logStage(runLogId, progress, '筛选', 'skipped', '所有平台抓取失败，跳过筛选');
+      this.logStage(runLogId, progress, '生成草稿', 'skipped', '所有平台抓取失败，跳过草稿生成');
+      this.logStage(runLogId, progress, '推送', 'skipped', '所有平台抓取失败，跳过推送');
+      throw new Error('所有平台抓取失败');
+    }
 
     if (sources && aggregation.every((stat) => stat.errors > 0)) {
       this.logStage(runLogId, progress, '筛选', 'skipped', '补抓失败，跳过筛选');

@@ -23,6 +23,7 @@ export interface AccountProfile {
 
 export interface ContentPool {
   id?: number;
+  user_id?: string;
   source: string;
   title?: string;
   content: string;
@@ -156,12 +157,28 @@ export class DatabaseManager {
   }
 
   private migrate(): void {
+    this.migrateContentPoolUserIsolation();
+
     const columns = this.db.prepare('PRAGMA table_info(recommendations)').all() as Array<{ name: string }>;
     const columnNames = new Set(columns.map((column) => column.name));
     if (!columnNames.has('user_id')) {
       this.db.exec('ALTER TABLE recommendations ADD COLUMN user_id TEXT');
     }
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_recommendations_user_id ON recommendations(user_id, recommended_at)');
+    this.db.exec(`
+      UPDATE recommendations
+      SET user_id = 'local'
+      WHERE user_id IS NULL OR user_id = ''
+    `);
+    this.db.exec(`
+      DELETE FROM recommendations
+      WHERE id NOT IN (
+        SELECT MAX(id)
+        FROM recommendations
+        GROUP BY user_id, content_id
+      )
+    `);
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_recommendations_user_content ON recommendations(user_id, content_id)');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS runtime_credential_checks (
         user_id TEXT NOT NULL,
@@ -174,6 +191,52 @@ export class DatabaseManager {
       )
     `);
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_runtime_credential_checks_platform ON runtime_credential_checks(platform)');
+  }
+
+  private migrateContentPoolUserIsolation(): void {
+    const columns = this.db.prepare('PRAGMA table_info(content_pool)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'user_id')) {
+      this.db.pragma('foreign_keys = OFF');
+      try {
+        this.db.exec(`
+          BEGIN;
+          CREATE TABLE content_pool_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL DEFAULT 'local',
+            source TEXT NOT NULL,
+            title TEXT,
+            content TEXT NOT NULL,
+            url TEXT,
+            author TEXT,
+            published_at TIMESTAMP,
+            metrics TEXT,
+            collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            embedding_vector TEXT,
+            UNIQUE(user_id, url)
+          );
+          INSERT INTO content_pool_migrated (
+            id, user_id, source, title, content, url, author, published_at, metrics, collected_at, embedding_vector
+          )
+          SELECT
+            id, 'local', source, title, content, url, author, published_at, metrics, collected_at, embedding_vector
+          FROM content_pool;
+          DROP TABLE content_pool;
+          ALTER TABLE content_pool_migrated RENAME TO content_pool;
+          COMMIT;
+        `);
+      } catch (error) {
+        if (this.db.inTransaction) {
+          this.db.exec('ROLLBACK');
+        }
+        throw error;
+      } finally {
+        this.db.pragma('foreign_keys = ON');
+      }
+    }
+
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_content_pool_url ON content_pool(url)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_content_pool_collected_at ON content_pool(collected_at)');
+    this.db.exec('CREATE INDEX IF NOT EXISTS idx_content_pool_user_collected_at ON content_pool(user_id, collected_at)');
   }
 
   /**
@@ -218,10 +281,11 @@ export class DatabaseManager {
    */
   insertContent(content: ContentPool): number {
     const stmt = this.db.prepare(`
-      INSERT INTO content_pool (source, title, content, url, author, published_at, metrics, embedding_vector)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO content_pool (user_id, source, title, content, url, author, published_at, metrics, collected_at, embedding_vector)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
+      content.user_id || 'local',
       content.source,
       content.title || null,
       content.content,
@@ -229,6 +293,7 @@ export class DatabaseManager {
       content.author || null,
       content.published_at || null,
       content.metrics || null,
+      content.collected_at || null,
       content.embedding_vector || null
     );
     logger.debug(`Content inserted with ID: ${result.lastInsertRowid}`);
@@ -240,18 +305,30 @@ export class DatabaseManager {
     return stmt.get(id) as ContentPool | undefined;
   }
 
-  getRecentContent(limit: number = 50): ContentPool[] {
+  getRecentContent(limit: number = 50, userId: string = 'local', hours?: number): ContentPool[] {
+    if (hours !== undefined) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM content_pool
+        WHERE user_id = ?
+          AND collected_at >= datetime('now', '-' || ? || ' hours')
+        ORDER BY collected_at DESC
+        LIMIT ?
+      `);
+      return stmt.all(userId, hours, limit) as ContentPool[];
+    }
+
     const stmt = this.db.prepare(`
       SELECT * FROM content_pool
+      WHERE user_id = ?
       ORDER BY collected_at DESC
       LIMIT ?
     `);
-    return stmt.all(limit) as ContentPool[];
+    return stmt.all(userId, limit) as ContentPool[];
   }
 
-  getContentByUrl(url: string): ContentPool | undefined {
-    const stmt = this.db.prepare('SELECT * FROM content_pool WHERE url = ?');
-    return stmt.get(url) as ContentPool | undefined;
+  getContentByUrl(url: string, userId: string = 'local'): ContentPool | undefined {
+    const stmt = this.db.prepare('SELECT * FROM content_pool WHERE user_id = ? AND url = ?');
+    return stmt.get(userId, url) as ContentPool | undefined;
   }
 
   getContentByHash(_hash: string): ContentPool | undefined {
@@ -274,13 +351,14 @@ export class DatabaseManager {
   /**
    * 获取最近指定小时内的内容
    */
-  getRecentContents(hours: number): ContentPool[] {
+  getRecentContents(hours: number, userId: string = 'local'): ContentPool[] {
     const stmt = this.db.prepare(`
       SELECT * FROM content_pool
-      WHERE collected_at >= datetime('now', '-' || ? || ' hours')
+      WHERE user_id = ?
+        AND collected_at >= datetime('now', '-' || ? || ' hours')
       ORDER BY collected_at DESC
     `);
-    return stmt.all(hours) as ContentPool[];
+    return stmt.all(userId, hours) as ContentPool[];
   }
 
   /**
@@ -316,17 +394,25 @@ export class DatabaseManager {
     const stmt = this.db.prepare(`
       INSERT INTO recommendations (user_id, content_id, match_score, match_reason, drafts, status)
       VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, content_id) DO UPDATE SET
+        match_score = excluded.match_score,
+        match_reason = excluded.match_reason,
+        drafts = excluded.drafts,
+        status = excluded.status,
+        user_feedback = NULL,
+        recommended_at = CURRENT_TIMESTAMP
+      RETURNING id
     `);
-    const result = stmt.run(
+    const result = stmt.get(
       recommendation.user_id || null,
       recommendation.content_id,
       recommendation.match_score,
       recommendation.match_reason || null,
       recommendation.drafts || null,
       recommendation.status || 'pending'
-    );
-    logger.debug(`Recommendation inserted with ID: ${result.lastInsertRowid}`);
-    return Number(result.lastInsertRowid);
+    ) as { id: number };
+    logger.debug(`Recommendation saved with ID: ${result.id}`);
+    return result.id;
   }
 
   updateRecommendationStatus(id: number, status: string, feedback?: string): void {

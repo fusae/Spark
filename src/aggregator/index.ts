@@ -34,6 +34,7 @@ export class ContentAggregator {
   private db: DatabaseManager;
   private scrapers: Map<string, BaseScraper>;
   private rateLimiter: RateLimiter;
+  private userId: string;
 
   constructor(
     db: DatabaseManager,
@@ -41,6 +42,7 @@ export class ContentAggregator {
     private onProgress?: AggregationProgressCallback
   ) {
     this.db = db;
+    this.userId = runtimeConfig.userId;
     this.rateLimiter = new RateLimiter({
       maxConcurrent: runtimeConfig.rateLimit.maxConcurrent,
       minDelay: runtimeConfig.rateLimit.requestDelayMs,
@@ -271,7 +273,7 @@ export class ContentAggregator {
    */
   private isUrlExists(url: string): boolean {
     try {
-      const existing = this.db.getContentByUrl(url);
+      const existing = this.db.getContentByUrl(url, this.userId);
       return !!existing;
     } catch (error) {
       logger.error('Error checking URL existence:', error as Error);
@@ -309,6 +311,7 @@ export class ContentAggregator {
     for (const item of items) {
       try {
         const contentPool: ContentPool = {
+          user_id: this.userId,
           source: item.source,
           title: item.title,
           content: item.content,

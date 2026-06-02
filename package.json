@@ -1,6 +1,6 @@
 {
   "name": "spark",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI Content Discovery for Creators",
   "type": "module",
   "main": "dist/desktop/main.js",
@@ -103,13 +103,13 @@
     }
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.29.0",
+    "@larksuiteoapi/node-sdk": "^1.66.1",
     "@lucasygu/redbook": "^0.7.2",
-    "axios": "^1.6.7",
+    "axios": "^1.16.1",
     "better-sqlite3": "^9.4.0",
     "dotenv": "^16.4.0",
     "electron-updater": "^6.8.3",
-    "node-cron": "^3.0.3",
+    "node-cron": "^4.2.1",
     "openai": "^4.28.0",
     "p-limit": "^5.0.0",
     "puppeteer": "^22.15.0",
@@ -128,5 +128,11 @@
     "tailwindcss": "^3.4.17",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "axios": "^1.16.1",
+    "protobufjs": "^8.5.0",
+    "qs": "^6.15.2",
+    "ws": "^8.21.0"
   }
 }

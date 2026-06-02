@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import type { ScheduledTask } from 'node-cron';
 import { ContentAggregator } from '../aggregator/index.js';
 import { ProfileManager } from '../profile/index.js';
 import { FilterEngine } from '../filter/index.js';
@@ -9,7 +10,7 @@ import { DatabaseManager } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 
 export class Scheduler {
-  private tasks: cron.ScheduledTask[] = [];
+  private tasks: ScheduledTask[] = [];
 
   constructor(
     private aggregator: ContentAggregator,

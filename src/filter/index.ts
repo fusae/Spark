@@ -19,7 +19,8 @@ export class FilterEngine {
   constructor(
     embeddingClient: EmbeddingClient,
     deepseekClient: DeepSeekClient,
-    private db: DatabaseManager
+    private db: DatabaseManager,
+    private userId: string = 'local'
   ) {
     this.embeddingFilter = new EmbeddingFilter(embeddingClient);
     this.aiRanker = new AIRanker(deepseekClient);
@@ -149,7 +150,7 @@ export class FilterEngine {
   private getRecentContents(options: Required<FilterOptions>): ContentPool[] {
     // 获取最近 48 小时的内容，数量为 topK 的 5 倍（确保有足够的候选）
     const limit = Math.max(options.topK * 5, 100);
-    return this.db.getRecentContent(limit);
+    return this.db.getRecentContent(limit, this.userId, 48);
   }
 
   /**

@@ -1,11 +1,12 @@
 import cron from 'node-cron';
+import type { ScheduledTask } from 'node-cron';
 import { DatabaseManager } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { RuntimeConfigRepository } from './config-repository.js';
 import { RuntimeJobQueue } from './job-queue.js';
 
 export class MultiUserScheduler {
-  private tasks = new Map<string, cron.ScheduledTask>();
+  private tasks = new Map<string, ScheduledTask>();
 
   constructor(
     private db: DatabaseManager,

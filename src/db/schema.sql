@@ -16,15 +16,17 @@ CREATE TABLE IF NOT EXISTS account_profile (
 -- 内容池表
 CREATE TABLE IF NOT EXISTS content_pool (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL DEFAULT 'local',
   source TEXT NOT NULL,
   title TEXT,
   content TEXT NOT NULL,
-  url TEXT UNIQUE,
+  url TEXT,
   author TEXT,
   published_at TIMESTAMP,
   metrics TEXT, -- JSON object
   collected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  embedding_vector TEXT -- Serialized vector
+  embedding_vector TEXT, -- Serialized vector
+  UNIQUE(user_id, url)
 );
 
 -- 推荐记录表

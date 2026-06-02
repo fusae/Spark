@@ -1,9 +1,7 @@
-import { mkdirSync } from 'fs';
-import { resolve } from 'path';
-import puppeteer, { Browser, Page } from 'puppeteer';
+import { Browser, Page } from 'puppeteer';
 import { logger } from '../utils/logger.js';
 import { probeCookieSession } from '../scrapers/session-probes.js';
-import { localBrowserLaunchOptions } from '../utils/browser-launcher.js';
+import { launchLocalBrowser } from '../scrapers/local-browser.js';
 
 export type CookiePlatform = 'douyin' | 'xiaohongshu' | 'zhihu' | 'weibo';
 
@@ -93,10 +91,7 @@ export class CookieHelper {
 
   async launchLoginWindow(platform: CookiePlatform, options: LoginOptions): Promise<string> {
     const platformConfig = PLATFORM_CONFIGS[platform];
-    const userDataDir = this.getUserDataDir(options.userId, platform);
-    mkdirSync(userDataDir, { recursive: true });
-
-    const browser = await puppeteer.launch(localBrowserLaunchOptions(userDataDir));
+    const browser = await launchLocalBrowser(platform, options.userId, false);
     this.browsers.add(browser);
 
     try {
@@ -329,15 +324,6 @@ export class CookieHelper {
     return Array.from(byName.entries())
       .map(([name, value]) => `${name}=${value}`)
       .join('; ');
-  }
-
-  private getUserDataDir(userId: string, platform: CookiePlatform): string {
-    const root = process.env.LOCAL_LOGIN_PROFILE_DIR || './data/browser-profiles';
-    return resolve(root, this.safeFileName(userId), platform);
-  }
-
-  private safeFileName(value: string): string {
-    return value.replace(/[^a-zA-Z0-9._-]/g, '_') || 'local';
   }
 
   private sleep(ms: number): Promise<void> {
