@@ -1622,6 +1622,7 @@ class AdminServer {
     let recommendationsRefreshTimer = null;
     let knownUserIds = new Set();
     let latestRunStats = {};
+    let overviewRunStats = {};
     let lastRecoveryNoticeKey = '';
     const autoRecoveryRunIds = new Set();
     let autoRecoveryRunning = false;
@@ -1957,6 +1958,7 @@ class AdminServer {
       document.getElementById('userId').value = id;
       document.getElementById('config').value = JSON.stringify(data, null, 2);
       latestRunStats = await loadLatestRunStats(id);
+      overviewRunStats = latestRunStats;
       updateOverview(data);
       updatePlatformStatus(data);
       loadConfigIntoForm(data);
@@ -1987,8 +1989,8 @@ class AdminServer {
 
     async function loadLatestRunStats(id) {
       try {
-        const runs = await request(\`/api/runs?userId=\${encodeURIComponent(id)}&limit=1\`);
-        return parseStats(runs[0]?.stats_json);
+        const runs = await request(\`/api/runs?userId=\${encodeURIComponent(id)}&limit=20\`);
+        return mergedOverviewStats(runs);
       } catch {
         return {};
       }
@@ -2013,7 +2015,7 @@ class AdminServer {
       renderAiHealth(config);
       renderEnvironmentHealth();
       renderRunOutcome(config);
-      document.getElementById('lastRunSummary').textContent = buildRunSummary(latestRunStats);
+      document.getElementById('lastRunSummary').textContent = buildRunSummary(overviewRunStats);
       notifyRecoverableFailures();
     }
 
@@ -2040,7 +2042,7 @@ class AdminServer {
       const embeddingReady = credentialReady(config, 'embedding');
       const deepseekReady = credentialReady(config, 'deepseek');
       const aiReadyCount = [embeddingReady, deepseekReady].filter(Boolean).length;
-      const hasRun = Boolean(latestRunStats && Array.isArray(latestRunStats.aggregation));
+      const hasRun = Boolean(overviewRunStats && Array.isArray(overviewRunStats.aggregation));
       const selected = latestRunStats?.filtering?.selected ?? latestRunStats?.result?.recommendations ?? 0;
       const drafts = latestRunStats?.drafts?.drafts ?? 0;
       const unresolvedIssues = attentionIssues(config);
@@ -2149,7 +2151,7 @@ class AdminServer {
       const container = document.getElementById('platformHealthGrid');
       if (!container) return;
 
-      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const aggregation = Array.isArray(overviewRunStats.aggregation) ? overviewRunStats.aggregation : [];
       const bySource = new Map(aggregation.map(item => [item.source, item]));
 
       container.innerHTML = platforms.map(platform => {
@@ -2300,7 +2302,7 @@ class AdminServer {
       const panel = document.getElementById('runOutcomeCard');
       if (!panel) return;
 
-      const hasRun = latestRunStats && Array.isArray(latestRunStats.aggregation);
+      const hasRun = overviewRunStats && Array.isArray(overviewRunStats.aggregation);
       const issues = attentionIssues(config);
       if (!hasRun) {
         panel.className = 'mb-6 rounded-lg border border-gray-200 bg-white p-4';
@@ -2323,7 +2325,7 @@ class AdminServer {
         <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
             <div class="font-semibold \${titleClass}">最近一次运行结果</div>
-            <div class="mt-1 text-sm text-gray-700">\${escapeHtml(buildRunSummary(latestRunStats))}</div>
+            <div class="mt-1 text-sm text-gray-700">\${escapeHtml(buildRunSummary(overviewRunStats))}</div>
           </div>
           <div class="flex shrink-0 gap-2">
             <button onclick="switchTab('recommendations'); loadRecommendations()" class="rounded-md bg-white px-3 py-2 text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">看推荐</button>
@@ -2352,7 +2354,7 @@ class AdminServer {
         seen.add(key);
         issues.push(issue);
       };
-      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const aggregation = Array.isArray(overviewRunStats.aggregation) ? overviewRunStats.aggregation : [];
       const failedSources = new Set(
         aggregation
           .filter(item => Number(item.errors || 0) > 0)
@@ -2530,7 +2532,7 @@ class AdminServer {
     }
 
     function platformRecoveryFailure(platformId, config = currentConfig) {
-      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const aggregation = Array.isArray(overviewRunStats.aggregation) ? overviewRunStats.aggregation : [];
       const stat = aggregation.find(item => item.source === platformId && Number(item.errors || 0) > 0);
       if (stat?.failureType === 'captcha_required' || stat?.failureType === 'auth_required') {
         return stat.failureType;
@@ -2566,7 +2568,7 @@ class AdminServer {
     }
 
     function notifyRecoverableFailures() {
-      const aggregation = Array.isArray(latestRunStats.aggregation) ? latestRunStats.aggregation : [];
+      const aggregation = Array.isArray(overviewRunStats.aggregation) ? overviewRunStats.aggregation : [];
       const userActionFailures = aggregation.filter(item => item.failureType === 'auth_required' || item.failureType === 'captcha_required');
       if (!userActionFailures.length) return;
       const key = userActionFailures.map(item => \`\${item.source}:\${item.userMessage}\`).join('|');
@@ -3371,6 +3373,7 @@ class AdminServer {
         updateRuntimeStatusFromRun(runs[0]);
         if (runs.length) {
           latestRunStats = parseStats(runs[0].stats_json);
+          overviewRunStats = mergedOverviewStats(runs);
           if (currentConfig) {
             updateOverview(currentConfig);
           }
@@ -3396,7 +3399,7 @@ class AdminServer {
       try {
         const [items, runs] = await Promise.all([
           request(\`/api/users/\${encodeURIComponent(currentUserId)}/recommendations?limit=30\`),
-          request(\`/api/runs?userId=\${encodeURIComponent(currentUserId)}&limit=1\`)
+          request(\`/api/runs?userId=\${encodeURIComponent(currentUserId)}&limit=20\`)
         ]);
         const latestRun = runs[0];
         const waitingForSubmittedRun = Date.now() < watchedRunDeadline &&
@@ -3407,6 +3410,7 @@ class AdminServer {
           latestRun.status !== 'running';
         latestRunId = latestRun?.id ?? latestRunId;
         latestRunStats = parseStats(latestRun?.stats_json);
+        overviewRunStats = mergedOverviewStats(runs);
         updateRuntimeStatusFromRun(latestRun);
         renderRunProgress(latestRun);
         document.getElementById('recommendationsList').innerHTML = renderRecommendations(items, latestRun);
@@ -3745,6 +3749,27 @@ class AdminServer {
       } catch {
         return {};
       }
+    }
+
+    function mergedOverviewStats(runs) {
+      if (!Array.isArray(runs) || runs.length === 0) return {};
+
+      const latest = parseStats(runs[0]?.stats_json);
+      const latestAggregation = Array.isArray(latest.aggregation) ? latest.aggregation : [];
+      const baseRun = runs.find(run => run.job_type === 'daily_run' && Array.isArray(parseStats(run.stats_json).aggregation));
+      const baseStats = baseRun ? parseStats(baseRun.stats_json) : latest;
+      const baseAggregation = Array.isArray(baseStats.aggregation) ? baseStats.aggregation : [];
+      const bySource = new Map(baseAggregation.map(item => [item.source, item]));
+      latestAggregation.forEach(item => {
+        if (item?.source) bySource.set(item.source, item);
+      });
+
+      return {
+        ...baseStats,
+        aggregation: Array.from(bySource.values()),
+        latestJobType: runs[0]?.job_type,
+        latestStatus: runs[0]?.status,
+      };
     }
 
     function formatStageData(data) {
