@@ -356,7 +356,7 @@ export class DouyinScraper extends BaseScraper {
   private async extractBrowserSearchItems(page: Page, keyword: string): Promise<ContentItem[]> {
     const rows = await page.evaluate(() => {
       const seen = new Set<string>();
-      const output: Array<{ id: string; url: string; title: string }> = [];
+      const output: Array<{ id: string; url: string; title: string; author?: string; metricText?: string }> = [];
 
       for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/video/"], a[href*="/note/"], a[href*="/user/"]'))) {
         const url = anchor.href;
@@ -381,6 +381,53 @@ export class DouyinScraper extends BaseScraper {
         output.push({ id, url, title: title.slice(0, 280) });
       }
 
+      if (output.length > 0) {
+        return output;
+      }
+
+      const lines = (document.body.innerText || '')
+        .split('\n')
+        .map((line) => line.replace(/\s+/g, ' ').trim())
+        .filter(Boolean);
+      const currentUrl = location.href;
+      const durationPattern = /^\d{1,2}:\d{2}(?::\d{2})?$/;
+      const metricPattern = /^[\d.]+[万亿千kK]?$/;
+      const noise = new Set([
+        '精选', '推荐', '搜索', '关注', '朋友', '我的', '直播', '放映厅', '短剧',
+        '综合', '视频', '用户', '多列', '单列', '筛选', '相关搜索', '问问AI',
+      ]);
+
+      for (let index = 0; index < lines.length - 2; index += 1) {
+        if (!durationPattern.test(lines[index])) {
+          continue;
+        }
+
+        let cursor = index + 1;
+        const metricText = metricPattern.test(lines[cursor] || '') ? lines[cursor++] : undefined;
+        const title = lines[cursor++] || '';
+        const author = lines[cursor]?.startsWith('@') ? lines[cursor++] : undefined;
+
+        if (
+          !title ||
+          title.length < 6 ||
+          title.startsWith('@') ||
+          noise.has(title) ||
+          seen.has(`${title}-${author || ''}`)
+        ) {
+          continue;
+        }
+
+        const id = `${index}-${Math.abs([...title].reduce((sum, char) => sum + char.charCodeAt(0), 0))}`;
+        seen.add(`${title}-${author || ''}`);
+        output.push({
+          id,
+          url: `${currentUrl}#spark-result-${id}`,
+          title: title.slice(0, 280),
+          author,
+          metricText,
+        });
+      }
+
       return output;
     });
 
@@ -389,8 +436,10 @@ export class DouyinScraper extends BaseScraper {
         id: `douyin-search-${row.id}`,
         source: 'douyin' as const,
         title: `[抖音搜索:${keyword}] ${row.title}`,
-        content: row.title,
+        content: this.cleanContent([row.title, row.author, row.metricText ? `热度 ${row.metricText}` : ''].filter(Boolean).join('\n')),
         url: row.url,
+        author: row.author?.replace(/^@/, ''),
+        metrics: row.metricText ? { likes: this.parseDouyinMetric(row.metricText) } : undefined,
         publishedAt: new Date(),
         collectedAt: new Date(),
       }))
@@ -400,11 +449,50 @@ export class DouyinScraper extends BaseScraper {
   private async hasBrowserChallenge(page: Page): Promise<boolean> {
     return page.evaluate(() => {
       const text = `${document.title}\n${document.body.innerText || ''}`;
+      const isVisible = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 1 &&
+          rect.height > 1 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          Number(style.opacity || '1') > 0.01;
+      };
+      const visibleChallenge = Array.from(document.querySelectorAll(
+        '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
+      )).some(isVisible);
+
       return /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text) ||
-        Boolean(document.querySelector(
-          '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
-        ));
+        visibleChallenge;
     }).catch(() => false);
+  }
+
+  private parseDouyinMetric(value: string): number | undefined {
+    const trimmed = value.trim();
+    const match = trimmed.match(/^([\d.]+)([万亿千kK]?)$/);
+    if (!match) {
+      return undefined;
+    }
+
+    const number = Number(match[1]);
+    if (!Number.isFinite(number)) {
+      return undefined;
+    }
+
+    const unit = match[2];
+    if (unit === '亿') {
+      return Math.round(number * 100_000_000);
+    }
+    if (unit === '万') {
+      return Math.round(number * 10_000);
+    }
+    if (unit === '千') {
+      return Math.round(number * 1_000);
+    }
+    if (unit === 'k' || unit === 'K') {
+      return Math.round(number * 1_000);
+    }
+    return Math.round(number);
   }
 
   private async waitForBrowserSearchItems(page: Page, keyword: string, timeoutMs = 180_000): Promise<ContentItem[]> {
