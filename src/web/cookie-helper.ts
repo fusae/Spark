@@ -147,7 +147,16 @@ export class CookieHelper {
       }
 
       if (mode === 'captcha' && (platform === 'douyin' || platform === 'zhihu')) {
-        if (await this.hasUsableVerificationPage(page, platform, cookies)) {
+        const challengeVisible = await this.hasCaptchaChallenge(page);
+        challengeSeen ||= challengeVisible;
+        if (!challengeVisible && await this.hasUsableVerificationPage(page, platform, cookies)) {
+          return cookies;
+        }
+        if (
+          platform === 'zhihu' &&
+          !challengeVisible &&
+          await this.hasLoginState(page, platform, cookies)
+        ) {
           return cookies;
         }
         await this.sleep(2000);
@@ -191,8 +200,21 @@ export class CookieHelper {
   private async hasCaptchaChallenge(page: Page): Promise<boolean> {
     return page.evaluate(() => {
       const text = document.body.innerText || '';
+      const isVisible = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 1 &&
+          rect.height > 1 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          Number(style.opacity || '1') > 0.01;
+      };
+      const visibleChallenge = Array.from(document.querySelectorAll(
+        '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"]'
+      )).some(isVisible);
+
       return /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text) ||
-        Boolean(document.querySelector('[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"]'));
+        visibleChallenge;
     }).catch(() => false);
   }
 
@@ -220,6 +242,12 @@ export class CookieHelper {
       }
 
       if (currentPlatform === 'zhihu') {
+        const hasLoggedInHeader = Boolean(document.querySelector(
+          '.AppHeader-profile, button.AppHeader-profileEntry, a[href*="/people/"]'
+        ));
+        if (hasLoggedInHeader && !/signin|login/.test(window.location.pathname)) {
+          return true;
+        }
         if (!window.location.pathname.startsWith('/search')) {
           return false;
         }
