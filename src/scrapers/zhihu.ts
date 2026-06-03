@@ -6,6 +6,7 @@ import { hasLocalBrowserProfile, launchLocalBrowser } from './local-browser.js';
 import { RecoverableFailure } from '../utils/failure.js';
 import type { RateLimiter } from '../utils/rate-limiter.js';
 import type { KeywordCookieSourceRuntimeConfig } from '../types/runtime-config.js';
+import type { Page } from 'puppeteer';
 
 interface ZhihuHotItem {
   title: string;
@@ -95,7 +96,7 @@ export class ZhihuScraper extends BaseScraper {
 
     let browser;
     try {
-      browser = await launchLocalBrowser('zhihu', this.sourceConfig.userId);
+      browser = await launchLocalBrowser('zhihu', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       await page.goto(
         `${this.baseUrl}/search?type=content&q=${encodeURIComponent(keyword)}`,
@@ -114,48 +115,25 @@ export class ZhihuScraper extends BaseScraper {
           return /account\/unhuman|安全验证|系统监测到.*网络环境|开始验证|访问异常|verify|captcha/i.test(text);
         })
         .catch(() => false);
-      const items = await page.evaluate(() => {
-        const cards = Array.from(document.querySelectorAll('.SearchResult-Card, .List-item, .ContentItem'));
-        return cards
-          .map((card) => {
-            const link = Array.from(card.querySelectorAll<HTMLAnchorElement>('a[href]'))
-              .find((anchor) => /\/question\/|\/answer\/|\/p\//.test(anchor.href));
-            const titleNode =
-              card.querySelector<HTMLElement>('.ContentItem-title') ||
-              card.querySelector<HTMLElement>('h2') ||
-              link;
-            const excerptNode =
-              card.querySelector<HTMLElement>('.RichContent-inner') ||
-              card.querySelector<HTMLElement>('.SearchResult-CardSummary') ||
-              card.querySelector<HTMLElement>('.RichText');
-            const authorNode =
-              card.querySelector<HTMLElement>('.AuthorInfo-name') ||
-              card.querySelector<HTMLElement>('.UserLink-link');
-            const heatNode =
-              card.querySelector<HTMLElement>('.VoteButton') ||
-              card.querySelector<HTMLElement>('[class*="vote"]');
+      const fallbackItems = await this.extractBrowserItems(page);
 
-            return {
-              title: (titleNode?.innerText || link?.innerText || '').trim(),
-              url: link?.href || '',
-              excerpt: (excerptNode?.innerText || card.textContent || '').trim(),
-              author: (authorNode?.innerText || '').trim(),
-              heat: (heatNode?.textContent || '').trim(),
-            };
-          })
-          .filter((item) => item.title && item.url)
-          .slice(0, 20);
-      });
-
-      if (items.length === 0 && needsLogin) {
+      if (fallbackItems.length === 0 && needsLogin) {
         throw new RecoverableFailure('auth_required', '知乎登录态失效，需要重新登录', true, '重新登录');
       }
 
-      if (items.length === 0 && needsVerification) {
+      if (fallbackItems.length === 0 && needsVerification && this.sourceConfig.browserHeadless === false) {
+        logger.info(`Zhihu verification required for "${keyword}", waiting for user to finish it`);
+        const verifiedItems = await this.waitForBrowserSearchItems(page, keyword);
+        if (verifiedItems.length > 0) {
+          return verifiedItems;
+        }
+      }
+
+      if (fallbackItems.length === 0 && needsVerification) {
         throw new RecoverableFailure('captcha_required', '知乎触发安全验证，需要在登录窗口完成验证后重试', true, '处理验证');
       }
 
-      return items;
+      return fallbackItems;
     } catch (error) {
       if (error instanceof RecoverableFailure) {
         throw error;
@@ -165,6 +143,78 @@ export class ZhihuScraper extends BaseScraper {
     } finally {
       await browser?.close().catch(() => undefined);
     }
+  }
+
+  private async waitForBrowserSearchItems(page: Page, keyword: string, timeoutMs = 180_000): Promise<ZhihuHotItem[]> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await this.randomDelay(2000, 3000);
+      await page.mouse.wheel({ deltaY: 1200 }).catch(() => undefined);
+      const items = await this.extractBrowserItems(page);
+      if (items.length > 0) {
+        logger.info(`Zhihu browser collected ${items.length} items after verification for "${keyword}"`);
+        return items;
+      }
+    }
+
+    return [];
+  }
+
+  private async extractBrowserItems(page: Page): Promise<ZhihuHotItem[]> {
+    return page.evaluate(() => {
+      const cards = Array.from(document.querySelectorAll('.SearchResult-Card, .List-item, .ContentItem, [data-za-detail-view-path-module], [class*="SearchItem"]'));
+      const items = cards
+        .map((card) => {
+          const link = Array.from(card.querySelectorAll<HTMLAnchorElement>('a[href]'))
+            .find((anchor) => /\/question\/|\/answer\/|\/p\//.test(anchor.href));
+          const titleNode =
+            card.querySelector<HTMLElement>('.ContentItem-title') ||
+            card.querySelector<HTMLElement>('h2') ||
+            link;
+          const excerptNode =
+            card.querySelector<HTMLElement>('.RichContent-inner') ||
+            card.querySelector<HTMLElement>('.SearchResult-CardSummary') ||
+            card.querySelector<HTMLElement>('.RichText');
+          const authorNode =
+            card.querySelector<HTMLElement>('.AuthorInfo-name') ||
+            card.querySelector<HTMLElement>('.UserLink-link');
+          const heatNode =
+            card.querySelector<HTMLElement>('.VoteButton') ||
+            card.querySelector<HTMLElement>('[class*="vote"]');
+
+          return {
+            title: (titleNode?.innerText || link?.innerText || '').trim(),
+            url: link?.href || '',
+            excerpt: (excerptNode?.innerText || card.textContent || '').trim(),
+            author: (authorNode?.innerText || '').trim(),
+            heat: (heatNode?.textContent || '').trim(),
+          };
+        })
+        .filter((item) => item.title && item.url);
+      if (items.length > 0) {
+        return items.slice(0, 20);
+      }
+
+      const seen = new Set<string>();
+      const output: ZhihuHotItem[] = [];
+      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/question/"], a[href*="/answer/"], a[href*="/p/"]'))) {
+        const url = anchor.href;
+        if (seen.has(url)) continue;
+        const title = (anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!title || title.length < 4) continue;
+        seen.add(url);
+        const card = anchor.closest('.SearchResult-Card, .List-item, .ContentItem, [data-za-detail-view-path-module], div');
+        output.push({
+          title,
+          url,
+          excerpt: (card?.textContent || title).replace(/\s+/g, ' ').trim(),
+          author: '',
+          heat: '',
+        });
+        if (output.length >= 20) break;
+      }
+      return output;
+    });
   }
 
   private async scrapeDailyFallback(): Promise<ContentItem[]> {

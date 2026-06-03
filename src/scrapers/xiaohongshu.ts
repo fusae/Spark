@@ -236,7 +236,7 @@ export class XiaohongshuScraper extends BaseScraper {
 
     let browser;
     try {
-      browser = await launchLocalBrowser('xiaohongshu', this.sourceConfig.userId);
+      browser = await launchLocalBrowser('xiaohongshu', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       const responsePromise = this.waitForBrowserSearchResponse(page);
       await page.goto(

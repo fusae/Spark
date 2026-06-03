@@ -146,8 +146,12 @@ export class CookieHelper {
         logger.info(`[${platform} login check ${checkCount}] cookies: ${names}`);
       }
 
-      if (mode === 'captcha' && await this.hasUsableVerificationPage(page, platform, cookies)) {
-        return cookies;
+      if (mode === 'captcha' && (platform === 'douyin' || platform === 'zhihu')) {
+        if (await this.hasUsableVerificationPage(page, platform, cookies)) {
+          return cookies;
+        }
+        await this.sleep(2000);
+        continue;
       }
 
       const challengeVisible = mode === 'captcha' && await this.hasCaptchaChallenge(page);
@@ -197,26 +201,34 @@ export class CookieHelper {
     platform: CookiePlatform,
     cookies: BrowserCookie[]
   ): Promise<boolean> {
-    if (platform !== 'douyin' || !this.hasRequiredCookies(cookies, platform)) {
+    if (!['douyin', 'zhihu'].includes(platform) || !this.hasRequiredCookies(cookies, platform)) {
       return false;
     }
 
-    return page.evaluate(() => {
-      if (!window.location.pathname.startsWith('/search/')) {
-        return false;
-      }
-
+    return page.evaluate((currentPlatform) => {
       const text = document.body.innerText || '';
-      if (document.querySelector('a[href*="/video/"]')) {
-        return true;
-      }
-
-      if (/验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text)) {
+      if (/验证码|安全验证|滑块|请完成验证|风控|captcha|系统监测到.*网络环境/i.test(text)) {
         return false;
       }
 
-      return text.trim().length > 100;
-    }).catch(() => false);
+      if (currentPlatform === 'douyin') {
+        if (!window.location.pathname.startsWith('/search/')) {
+          return false;
+        }
+        return Boolean(document.querySelector('a[href*="/video/"], a[href*="/note/"]')) ||
+          text.trim().length > 100;
+      }
+
+      if (currentPlatform === 'zhihu') {
+        if (!window.location.pathname.startsWith('/search')) {
+          return false;
+        }
+        return Boolean(document.querySelector('a[href*="/question/"], a[href*="/answer/"], a[href*="/p/"]')) ||
+          text.trim().length > 100;
+      }
+
+      return false;
+    }, platform).catch(() => false);
   }
 
   private async collectCookies(page: Page, platform: CookiePlatform): Promise<BrowserCookie[]> {

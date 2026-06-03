@@ -217,6 +217,8 @@ export class RuntimeTaskRunner {
         userMessage: event.stats.userMessage,
         action: event.stats.actionLabel,
       });
+    }, {
+      localBrowserHeadless: sources ? false : undefined,
     });
     const aggregation = sources
       ? await aggregator.aggregateFrom(sources)

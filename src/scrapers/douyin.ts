@@ -143,6 +143,10 @@ export class DouyinScraper extends BaseScraper {
   }
 
   private async searchContentItems(keyword: string): Promise<ContentItem[]> {
+    if (this.sourceConfig.browserHeadless === false && hasLocalBrowserProfile('douyin', this.sourceConfig.userId)) {
+      return this.searchByBrowser(keyword);
+    }
+
     if (this.sourceConfig.tiktokDownloaderApiUrl) {
       const items = await this.searchByTikTokDownloader(keyword);
       if (items.length > 0) {
@@ -150,7 +154,18 @@ export class DouyinScraper extends BaseScraper {
       }
     }
 
-    const response = await this.searchByKeyword(keyword);
+    let response: DouyinSearchResponse;
+    try {
+      response = await this.searchByKeyword(keyword);
+    } catch (error) {
+      if (
+        error instanceof RecoverableFailure &&
+        hasLocalBrowserProfile('douyin', this.sourceConfig.userId)
+      ) {
+        return this.searchByBrowser(keyword);
+      }
+      throw error;
+    }
     const awemes = this.extractAwemes(response);
     const items = awemes
       .map((aweme) => this.convertSearchItemToContentItem(aweme, keyword))
@@ -257,7 +272,7 @@ export class DouyinScraper extends BaseScraper {
 
     let browser;
     try {
-      browser = await launchLocalBrowser('douyin', this.sourceConfig.userId);
+      browser = await launchLocalBrowser('douyin', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       const responsePromise = this.waitForBrowserSearchResponse(page, keyword);
 
@@ -265,8 +280,24 @@ export class DouyinScraper extends BaseScraper {
         `${this.baseUrl}/search/${encodeURIComponent(keyword)}?type=general`,
         { waitUntil: 'domcontentloaded', timeout: 60000 }
       );
+      await this.randomDelay(5000, 7000);
+      await page.mouse.wheel({ deltaY: 1600 }).catch(() => undefined);
+      await this.randomDelay(1200, 1800);
 
-      const response = await this.withTimeout(responsePromise, 30000, null);
+      const initialDomItems = await this.extractBrowserSearchItems(page, keyword);
+      if (initialDomItems.length > 0) {
+        logger.info(`Douyin browser DOM collected ${initialDomItems.length} items for "${keyword}"`);
+        return initialDomItems;
+      }
+      if (this.sourceConfig.browserHeadless === false && await this.hasBrowserChallenge(page)) {
+        logger.info(`Douyin verification required for "${keyword}", waiting for user to finish it`);
+        const verifiedItems = await this.waitForBrowserSearchItems(page, keyword);
+        if (verifiedItems.length > 0) {
+          return verifiedItems;
+        }
+      }
+
+      const response = await this.withTimeout(responsePromise, 12000, null);
       if (!response) {
         const domItems = await this.extractBrowserSearchItems(page, keyword);
         if (domItems.length > 0) {
@@ -327,9 +358,9 @@ export class DouyinScraper extends BaseScraper {
       const seen = new Set<string>();
       const output: Array<{ id: string; url: string; title: string }> = [];
 
-      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/video/"]'))) {
+      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/video/"], a[href*="/note/"], a[href*="/user/"]'))) {
         const url = anchor.href;
-        const id = url.match(/\/video\/(\d+)/)?.[1] || '';
+        const id = url.match(/\/(?:video|note)\/([^/?#]+)/)?.[1] || '';
         if (!id || seen.has(id)) {
           continue;
         }
@@ -364,6 +395,31 @@ export class DouyinScraper extends BaseScraper {
         collectedAt: new Date(),
       }))
       .filter((item) => this.validateItem(item));
+  }
+
+  private async hasBrowserChallenge(page: Page): Promise<boolean> {
+    return page.evaluate(() => {
+      const text = `${document.title}\n${document.body.innerText || ''}`;
+      return /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text) ||
+        Boolean(document.querySelector(
+          '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
+        ));
+    }).catch(() => false);
+  }
+
+  private async waitForBrowserSearchItems(page: Page, keyword: string, timeoutMs = 180_000): Promise<ContentItem[]> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      await this.randomDelay(2000, 3000);
+      await page.mouse.wheel({ deltaY: 1200 }).catch(() => undefined);
+      const items = await this.extractBrowserSearchItems(page, keyword);
+      if (items.length > 0) {
+        logger.info(`Douyin browser collected ${items.length} items after verification for "${keyword}"`);
+        return items;
+      }
+    }
+
+    return [];
   }
 
   private waitForBrowserSearchResponse(

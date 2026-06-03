@@ -25,12 +25,14 @@ export interface RedditSourceRuntimeConfig extends SourceRuntimeConfig {
 
 export interface KeywordCookieSourceRuntimeConfig extends SourceRuntimeConfig {
   userId?: string;
+  browserHeadless?: boolean;
   keywords: string[];
   cookie: string;
 }
 
 export interface DouyinSourceRuntimeConfig extends SourceRuntimeConfig {
   userId?: string;
+  browserHeadless?: boolean;
   keywords: string[];
   cookie: string;
   tiktokDownloaderApiUrl: string;
@@ -39,6 +41,7 @@ export interface DouyinSourceRuntimeConfig extends SourceRuntimeConfig {
 
 export interface XiaohongshuSourceRuntimeConfig extends SourceRuntimeConfig {
   userId?: string;
+  browserHeadless?: boolean;
   keywords: string[];
   cookie: string;
   adapter: 'redbook' | 'native';

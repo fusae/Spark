@@ -84,7 +84,7 @@ export class WeiboScraper extends BaseScraper {
 
     let browser;
     try {
-      browser = await launchLocalBrowser('weibo', this.sourceConfig.userId);
+      browser = await launchLocalBrowser('weibo', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       await page.goto(
         `${this.baseUrl}/weibo?q=${encodeURIComponent(keyword)}&xsort=hot&suball=1`,

@@ -27,6 +27,10 @@ export interface AggregationProgressEvent {
 
 export type AggregationProgressCallback = (event: AggregationProgressEvent) => void;
 
+interface ContentAggregatorOptions {
+  localBrowserHeadless?: boolean;
+}
+
 /**
  * 内容聚合器 - 协调所有爬虫并管理内容存储
  */
@@ -39,7 +43,8 @@ export class ContentAggregator {
   constructor(
     db: DatabaseManager,
     runtimeConfig: UserRuntimeConfig = localRuntimeConfig,
-    private onProgress?: AggregationProgressCallback
+    private onProgress?: AggregationProgressCallback,
+    private options: ContentAggregatorOptions = {}
   ) {
     this.db = db;
     this.userId = runtimeConfig.userId;
@@ -57,6 +62,7 @@ export class ContentAggregator {
         ? ['zhihu', new ZhihuScraper(this.rateLimiter, {
           ...sourceConfig.zhihu,
           userId: runtimeConfig.userId,
+          browserHeadless: this.options.localBrowserHeadless,
         })]
         : null,
       sourceConfig.producthunt.enabled ? ['producthunt', new ProductHuntScraper(this.rateLimiter)] : null,
@@ -66,18 +72,21 @@ export class ContentAggregator {
         ? ['douyin', new DouyinScraper(this.rateLimiter, {
           ...sourceConfig.douyin,
           userId: runtimeConfig.userId,
+          browserHeadless: this.options.localBrowserHeadless,
         })]
         : null,
       sourceConfig.xiaohongshu.enabled
         ? ['xiaohongshu', new XiaohongshuScraper(this.rateLimiter, {
           ...sourceConfig.xiaohongshu,
           userId: runtimeConfig.userId,
+          browserHeadless: this.options.localBrowserHeadless,
         })]
         : null,
       sourceConfig.weibo.enabled
         ? ['weibo', new WeiboScraper(this.rateLimiter, {
           ...sourceConfig.weibo,
           userId: runtimeConfig.userId,
+          browserHeadless: this.options.localBrowserHeadless,
         })]
         : null,
     ];
