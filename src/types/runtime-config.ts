@@ -68,6 +68,13 @@ export interface UserRuntimeConfig {
   profilePath: string;
   sources: SourcesRuntimeConfig;
   ai: {
+    mode: 'local' | 'cloud';
+    cloud: {
+      baseURL: string;
+      token: string;
+      email: string;
+      expiresAt: string;
+    };
     embedding: {
       apiKey: string;
       baseURL: string;

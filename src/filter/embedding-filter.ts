@@ -1,4 +1,4 @@
-import { EmbeddingClient } from '../ai/embedding.js';
+import type { EmbeddingProvider } from '../ai/types.js';
 import { ContentPool } from '../db/index.js';
 import { logger } from '../utils/logger.js';
 import { FilteredContent } from './types.js';
@@ -34,7 +34,7 @@ export function cosineSimilarity(vecA: number[], vecB: number[]): number {
  * 使用向量相似度从大量内容中筛选出候选集
  */
 export class EmbeddingFilter {
-  constructor(private embeddingClient: EmbeddingClient) {}
+  constructor(private embeddingClient: EmbeddingProvider) {}
 
   /**
    * 执行 Embedding 初筛

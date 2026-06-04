@@ -61,6 +61,13 @@ export const config = {
     baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   },
 
+  cloud: {
+    aiMode: process.env.SPARK_AI_MODE === 'cloud' ? 'cloud' : 'local',
+    baseURL: process.env.SPARK_CLOUD_URL || 'http://127.0.0.1:8787',
+    token: process.env.SPARK_CLOUD_TOKEN || '',
+    email: process.env.SPARK_CLOUD_EMAIL || '',
+  },
+
   // 创作者账号配置
   xAccount: {
     handle: process.env.X_ACCOUNT_HANDLE || 'example_creator',
@@ -173,6 +180,13 @@ export function createLocalRuntimeConfig(): UserRuntimeConfig {
       defaultReceiverId: config.lark.defaultReceiverId,
     },
     ai: {
+      mode: config.cloud.aiMode,
+      cloud: {
+        baseURL: config.cloud.baseURL,
+        token: config.cloud.token,
+        email: config.cloud.email,
+        expiresAt: '',
+      },
       embedding: {
         apiKey: config.embedding.apiKey,
         baseURL: config.embedding.baseURL,

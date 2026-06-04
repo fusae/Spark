@@ -64,6 +64,11 @@ export class RuntimeConfigRepository {
     this.saveCredential(config.userId, 'embedding_model', config.ai.embedding.model);
     this.saveCredential(config.userId, 'deepseek_api_key', config.ai.deepseek.apiKey);
     this.saveCredential(config.userId, 'deepseek_base_url', config.ai.deepseek.baseURL);
+    this.saveCredential(config.userId, 'ai_mode', config.ai.mode);
+    this.saveCredential(config.userId, 'cloud_base_url', config.ai.cloud.baseURL);
+    this.saveCredential(config.userId, 'cloud_token', config.ai.cloud.token);
+    this.saveCredential(config.userId, 'cloud_email', config.ai.cloud.email);
+    this.saveCredential(config.userId, 'cloud_expires_at', config.ai.cloud.expiresAt);
   }
 
   get(userId: string): UserRuntimeConfig | undefined {
@@ -92,6 +97,13 @@ export class RuntimeConfigRepository {
         defaultReceiverId: lark?.default_receiver_id || '',
       },
       ai: {
+        mode: this.toAiMode(this.decryptCredential(credentials, 'ai_mode')),
+        cloud: {
+          baseURL: this.decryptCredential(credentials, 'cloud_base_url') || 'http://127.0.0.1:8787',
+          token: this.decryptCredential(credentials, 'cloud_token'),
+          email: this.decryptCredential(credentials, 'cloud_email'),
+          expiresAt: this.decryptCredential(credentials, 'cloud_expires_at'),
+        },
         embedding: {
           apiKey: this.decryptCredential(credentials, 'embedding_api_key'),
           baseURL: this.decryptCredential(credentials, 'embedding_base_url'),
@@ -281,5 +293,9 @@ export class RuntimeConfigRepository {
     }
 
     return 'chrome';
+  }
+
+  private toAiMode(value: string): 'local' | 'cloud' {
+    return value === 'cloud' ? 'cloud' : 'local';
   }
 }

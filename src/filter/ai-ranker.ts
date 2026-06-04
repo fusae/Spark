@@ -1,4 +1,4 @@
-import { DeepSeekClient } from '../ai/deepseek.js';
+import type { ChatClient } from '../ai/types.js';
 import { logger } from '../utils/logger.js';
 import { FilteredContent, RankedContent } from './types.js';
 import { AccountProfile } from '../profile/types.js';
@@ -10,7 +10,7 @@ import { AccountProfile } from '../profile/types.js';
 export class AIRanker {
   private lastFallbackReason = '';
 
-  constructor(private deepseekClient: DeepSeekClient) {}
+  constructor(private chatClient: ChatClient) {}
 
   /**
    * 执行 AI 精排
@@ -32,7 +32,7 @@ export class AIRanker {
       // 1. 构建 Prompt
       const prompt = this.buildRankingPrompt(candidates, profile);
 
-      // 2. 调用 DeepSeek
+      // 2. 调用 AI
       const response = await this.callDeepSeek(prompt);
 
       // 3. 解析结果
@@ -119,27 +119,12 @@ ${candidateList}
 - 如果没有符合条件的内容，返回空数组 []`;
   }
 
-  /**
-   * 调用 DeepSeek API
-   */
   private async callDeepSeek(prompt: string): Promise<string> {
-    const response = await this.deepseekClient['client'].chat.completions.create({
-      model: this.deepseekClient['model'],
-      messages: [
-        {
-          role: 'system',
-          content: '你是一个专业的社交媒体内容分析师，擅长评估内容与账号的匹配度。',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
+    return this.chatClient.chat(prompt, {
+      systemPrompt: '你是一个专业的社交媒体内容分析师，擅长评估内容与账号的匹配度。',
       temperature: 0.3,
-      response_format: { type: 'json_object' },
+      responseFormat: 'json_object',
     });
-
-    return response.choices[0].message.content || '{}';
   }
 
   /**

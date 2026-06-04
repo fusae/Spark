@@ -2,6 +2,8 @@ import { ContentAggregator } from '../aggregator/index.js';
 import { DatabaseManager } from '../db/index.js';
 import { EmbeddingClient } from '../ai/embedding.js';
 import { DeepSeekClient } from '../ai/deepseek.js';
+import { CloudAiClient } from '../ai/cloud.js';
+import type { ChatClient, EmbeddingProvider } from '../ai/types.js';
 import { FeishuClient } from '../feishu/index.js';
 import { FilterEngine } from '../filter/index.js';
 import { DraftGenerator } from '../generator/index.js';
@@ -167,12 +169,7 @@ export class RuntimeTaskRunner {
 
     this.logStage(runLogId, progress, '初始化', 'running', '创建模型、爬虫、筛选器和推送客户端');
     const aiConfig = this.resolveAiConfig(configForUser);
-    const embeddingClient = new EmbeddingClient(
-      aiConfig.embedding.apiKey,
-      aiConfig.embedding.baseURL,
-      aiConfig.embedding.model
-    );
-    const deepseekClient = new DeepSeekClient(aiConfig.deepseek.apiKey, aiConfig.deepseek.baseURL);
+    const aiClients = this.createAiClients(aiConfig);
     const profileManager = new ProfileManager(
       this.db,
       aiConfig.embedding.apiKey,
@@ -181,10 +178,13 @@ export class RuntimeTaskRunner {
       aiConfig.deepseek.baseURL,
       aiConfig.embedding.baseURL,
       aiConfig.embedding.model,
-      configForUser.profilePath
+      configForUser.profilePath,
+      {
+        embeddingClient: aiClients.embedding,
+      }
     );
-    const filterEngine = new FilterEngine(embeddingClient, deepseekClient, this.db, configForUser.userId);
-    const draftGenerator = new DraftGenerator(deepseekClient, 'deepseek-chat');
+    const filterEngine = new FilterEngine(aiClients.embedding, aiClients.chat, this.db, configForUser.userId);
+    const draftGenerator = new DraftGenerator(aiClients.chat, aiClients.modelName);
 
     this.logStage(runLogId, progress, '抓取', 'running', sources ? '开始补抓失败平台' : '开始抓取所有已启用平台', {
       sources: sources || sourceNames.filter((source) => configForUser.sources[source].enabled),
@@ -264,7 +264,7 @@ export class RuntimeTaskRunner {
       profile = await profileManager.initializeProfile();
     }
     if (!profile.interestVector || profile.interestVector.length === 0) {
-      if (aiConfig.embedding.apiKey) {
+      if (this.canGenerateEmbeddings(aiConfig)) {
         this.logStage(runLogId, progress, '画像', 'running', '账号画像缺少向量，正在自动补齐');
         try {
           await profileManager.refreshVector();
@@ -490,6 +490,13 @@ export class RuntimeTaskRunner {
 
   private resolveAiConfig(configForUser: UserRuntimeConfig): UserRuntimeConfig['ai'] {
     return {
+      mode: configForUser.ai.mode === 'cloud' ? 'cloud' : 'local',
+      cloud: {
+        baseURL: configForUser.ai.cloud?.baseURL || 'http://127.0.0.1:8787',
+        token: configForUser.ai.cloud?.token || '',
+        email: configForUser.ai.cloud?.email || '',
+        expiresAt: configForUser.ai.cloud?.expiresAt || '',
+      },
       embedding: {
         apiKey: configForUser.ai.embedding.apiKey,
         baseURL: configForUser.ai.embedding.baseURL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -500,6 +507,46 @@ export class RuntimeTaskRunner {
         baseURL: configForUser.ai.deepseek.baseURL || 'https://api.deepseek.com',
       },
     };
+  }
+
+  private createAiClients(aiConfig: UserRuntimeConfig['ai']): {
+    embedding: EmbeddingProvider;
+    chat: ChatClient;
+    modelName: string;
+  } {
+    if (aiConfig.mode === 'cloud' && aiConfig.cloud.token) {
+      const cloud = new CloudAiClient({
+        baseURL: aiConfig.cloud.baseURL,
+        token: aiConfig.cloud.token,
+      });
+      return {
+        embedding: cloud,
+        chat: cloud,
+        modelName: 'spark-cloud',
+      };
+    }
+
+    if (aiConfig.mode === 'cloud' && !aiConfig.cloud.token) {
+      logger.warn('Spark Cloud mode selected but token is missing, falling back to local AI config');
+    }
+
+    const embeddingClient = new EmbeddingClient(
+      aiConfig.embedding.apiKey,
+      aiConfig.embedding.baseURL,
+      aiConfig.embedding.model
+    );
+    const deepseekClient = new DeepSeekClient(aiConfig.deepseek.apiKey, aiConfig.deepseek.baseURL);
+    return {
+      embedding: embeddingClient,
+      chat: deepseekClient,
+      modelName: 'deepseek-chat',
+    };
+  }
+
+  private canGenerateEmbeddings(aiConfig: UserRuntimeConfig['ai']): boolean {
+    return aiConfig.mode === 'cloud'
+      ? Boolean(aiConfig.cloud.token)
+      : Boolean(aiConfig.embedding.apiKey);
   }
 
   private recordAiCredentialFailure(

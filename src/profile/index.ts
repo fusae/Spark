@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { DatabaseManager } from '../db/index.js';
 import { Vectorizer } from './vectorizer.js';
 import { DeepSeekClient } from '../ai/deepseek.js';
+import type { EmbeddingProvider } from '../ai/types.js';
 import { AccountProfile, InitialProfileData } from './types.js';
 import { logger } from '../utils/logger.js';
 
@@ -29,10 +30,17 @@ export class ProfileManager {
     deepseekBaseURL?: string,
     embeddingBaseURL?: string,
     embeddingModel?: string,
-    profilePath?: string
+    profilePath?: string,
+    providers?: {
+      embeddingClient?: EmbeddingProvider;
+    }
   ) {
     this.db = db;
-    this.vectorizer = new Vectorizer(embeddingApiKey, embeddingBaseURL, embeddingModel);
+    this.vectorizer = new Vectorizer(
+      providers?.embeddingClient || embeddingApiKey,
+      embeddingBaseURL,
+      embeddingModel
+    );
     this.accountHandle = accountHandle;
     this.profilePath = profilePath;
 

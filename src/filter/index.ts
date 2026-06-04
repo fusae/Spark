@@ -1,5 +1,4 @@
-import { EmbeddingClient } from '../ai/embedding.js';
-import { DeepSeekClient } from '../ai/deepseek.js';
+import type { ChatClient, EmbeddingProvider } from '../ai/types.js';
 import { DatabaseManager, ContentPool } from '../db/index.js';
 import { ContentItem } from '../types/content.js';
 import { AccountProfile } from '../profile/types.js';
@@ -17,13 +16,13 @@ export class FilterEngine {
   private aiRanker: AIRanker;
 
   constructor(
-    embeddingClient: EmbeddingClient,
-    deepseekClient: DeepSeekClient,
+    embeddingClient: EmbeddingProvider,
+    chatClient: ChatClient,
     private db: DatabaseManager,
     private userId: string = 'local'
   ) {
     this.embeddingFilter = new EmbeddingFilter(embeddingClient);
-    this.aiRanker = new AIRanker(deepseekClient);
+    this.aiRanker = new AIRanker(chatClient);
     logger.info('FilterEngine initialized');
   }
 

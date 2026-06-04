@@ -14,7 +14,12 @@ import { sourceNames, UserRuntimeConfig } from '../types/runtime-config.js';
 import { findBrowserExecutable } from '../utils/browser-launcher.js';
 import { logger } from '../utils/logger.js';
 import { CookieHelper, isCookiePlatform } from './cookie-helper.js';
-import { isAiCredential, validateAiCredential, validateCredential } from './credential-validator.js';
+import {
+  isAiCredential,
+  validateAiCredential,
+  validateCredential,
+  type CredentialValidationResult,
+} from './credential-validator.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -187,6 +192,15 @@ class AdminServer {
         return;
       }
 
+      const cloudAuthMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/cloud\/(login|register)$/);
+      if (cloudAuthMatch && method === 'POST') {
+        const body = await this.readJson(req);
+        const saved = await this.authenticateCloud(cloudAuthMatch[1], cloudAuthMatch[2] as 'login' | 'register', body);
+        this.scheduler.reload();
+        this.json(res, this.publicConfig(saved));
+        return;
+      }
+
       if (credentialMatch && method === 'DELETE') {
         this.deleteCredential(credentialMatch[1], credentialMatch[2]);
         this.json(res, { ok: true });
@@ -202,7 +216,9 @@ class AdminServer {
           ? await validateCredential(platform, this.getRuntimeConfig(userId))
           : isAiCredential(platform)
             ? await validateAiCredential(platform, this.getRuntimeConfig(userId))
-            : null;
+            : platform === 'cloud'
+              ? await this.validateCloudSession(this.getRuntimeConfig(userId))
+              : null;
         if (!validation) {
           this.json(res, { error: `Unsupported credential: ${platform}` }, 400);
           return;
@@ -441,6 +457,9 @@ class AdminServer {
       runtimeConfig.ai.embedding.apiKey = value;
     } else if (platform === 'deepseek') {
       runtimeConfig.ai.deepseek.apiKey = value;
+    } else if (platform === 'cloud') {
+      runtimeConfig.ai.cloud.token = value;
+      runtimeConfig.ai.mode = 'cloud';
     } else {
       throw new Error(`Unsupported platform credential: ${platform}`);
     }
@@ -454,6 +473,14 @@ class AdminServer {
         message: isCookiePlatform(platform) ? '已保存登录状态，等待检查' : '已保存密钥，等待验证',
       });
     }
+    if (platform === 'cloud') {
+      this.db.upsertRuntimeCredentialCheck({
+        user_id: userId,
+        platform,
+        status: 'unknown',
+        message: '已保存 Spark Cloud 登录状态，等待验证',
+      });
+    }
     return runtimeConfig;
   }
 
@@ -465,6 +492,15 @@ class AdminServer {
 
     this.db.deleteRuntimeCredential(userId, credentialKey);
     this.db.deleteRuntimeCredentialCheck(userId, credential);
+    if (credential === 'cloud') {
+      const runtimeConfig = this.getRuntimeConfig(userId);
+      runtimeConfig.ai.mode = 'local';
+      runtimeConfig.ai.cloud.token = '';
+      runtimeConfig.ai.cloud.expiresAt = '';
+      this.repository.save(runtimeConfig);
+      this.db.deleteRuntimeCredential(userId, credentialKey);
+      this.db.deleteRuntimeCredential(userId, 'cloud_expires_at');
+    }
   }
 
   private runtimeCredentialKey(credential: string): string {
@@ -476,6 +512,9 @@ class AdminServer {
     }
     if (credential === 'deepseek') {
       return 'deepseek_api_key';
+    }
+    if (credential === 'cloud') {
+      return 'cloud_token';
     }
     return '';
   }
@@ -498,6 +537,93 @@ class AdminServer {
         message: '已更新 AI 自动写草稿密钥，等待验证',
       });
     }
+    if (Object.prototype.hasOwnProperty.call(incoming.ai || {}, 'mode') || Object.prototype.hasOwnProperty.call(incoming.ai?.cloud || {}, 'token')) {
+      this.db.upsertRuntimeCredentialCheck({
+        user_id: userId,
+        platform: 'cloud',
+        status: 'unknown',
+        message: incoming.ai?.mode === 'cloud' ? '已切换到 Spark Cloud，等待验证' : '已切换到自带密钥模式',
+      });
+    }
+  }
+
+  private async authenticateCloud(
+    userId: string,
+    action: 'login' | 'register',
+    body: JsonBody
+  ): Promise<UserRuntimeConfig> {
+    const runtimeConfig = this.getRuntimeConfig(userId);
+    const baseURL = (this.stringValue(body.baseURL) || runtimeConfig.ai.cloud.baseURL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+    const email = this.stringValue(body.email).trim().toLowerCase();
+    const password = this.stringValue(body.password);
+    if (!email || !password) {
+      throw new Error('请输入邮箱和密码');
+    }
+
+    const response = await fetch(`${baseURL}/api/auth/${action}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    const data = await response.json().catch(() => ({})) as {
+      token?: string;
+      expiresAt?: string;
+      user?: { email?: string };
+      error?: string;
+    };
+    if (!response.ok || !data.token) {
+      throw new Error(data.error || 'Spark Cloud 登录失败');
+    }
+
+    runtimeConfig.ai.mode = 'cloud';
+    runtimeConfig.ai.cloud = {
+      baseURL,
+      token: data.token,
+      email: data.user?.email || email,
+      expiresAt: data.expiresAt || '',
+    };
+    this.repository.save(runtimeConfig);
+    this.db.upsertRuntimeCredentialCheck({
+      user_id: userId,
+      platform: 'cloud',
+      status: 'valid',
+      message: action === 'register' ? 'Spark Cloud 注册并登录成功' : 'Spark Cloud 登录成功',
+    });
+    return runtimeConfig;
+  }
+
+  private async validateCloudSession(configForUser: UserRuntimeConfig): Promise<CredentialValidationResult> {
+    const baseURL = (configForUser.ai.cloud.baseURL || '').replace(/\/+$/, '');
+    const token = configForUser.ai.cloud.token;
+    if (!baseURL || !token) {
+      return this.credentialResult('cloud', 'invalid', '还没有登录 Spark Cloud');
+    }
+
+    try {
+      const response = await fetch(`${baseURL}/api/quota`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string; access?: { mode?: string } };
+      if (!response.ok) {
+        return this.credentialResult('cloud', 'invalid', data.error || 'Spark Cloud 登录已失效');
+      }
+      return this.credentialResult('cloud', 'valid', `Spark Cloud 可用（${data.access?.mode || 'active'}）`);
+    } catch (error) {
+      return this.credentialResult('cloud', 'unknown', (error as Error).message);
+    }
+  }
+
+  private credentialResult(
+    platform: string,
+    status: CredentialValidationResult['status'],
+    message: string
+  ): CredentialValidationResult {
+    return {
+      platform,
+      status,
+      message,
+      checkedAt: new Date().toISOString(),
+    };
   }
 
   private getProfile(userId: string): unknown {
@@ -602,6 +728,15 @@ class AdminServer {
       lark.appSecret = base.lark.appSecret;
     }
     const ai = {
+      mode: incoming.ai?.mode === 'cloud'
+        ? 'cloud'
+        : incoming.ai?.mode === 'local'
+          ? 'local'
+          : base.ai.mode,
+      cloud: {
+        ...base.ai.cloud,
+        ...incoming.ai?.cloud,
+      },
       embedding: {
         ...base.ai.embedding,
         ...incoming.ai?.embedding,
@@ -616,6 +751,9 @@ class AdminServer {
     }
     if (!incoming.ai?.deepseek?.apiKey) {
       ai.deepseek.apiKey = base.ai.deepseek.apiKey;
+    }
+    if (!incoming.ai?.cloud?.token) {
+      ai.cloud.token = base.ai.cloud.token;
     }
     if (!incoming.sources?.zhihu?.cookie) {
       sources.zhihu.cookie = base.sources.zhihu.cookie;
@@ -659,6 +797,12 @@ class AdminServer {
     return {
       ...runtimeConfig,
       ai: {
+        mode: runtimeConfig.ai.mode || 'local',
+        cloud: {
+          ...runtimeConfig.ai.cloud,
+          token: '',
+          expiresAt: runtimeConfig.ai.cloud.expiresAt || '',
+        },
         embedding: {
           ...runtimeConfig.ai.embedding,
           apiKey: '',
@@ -713,6 +857,13 @@ class AdminServer {
         defaultReceiverId: '',
       },
       ai: {
+        mode: 'local',
+        cloud: {
+          baseURL: base.ai.cloud?.baseURL || 'http://127.0.0.1:8787',
+          token: '',
+          email: '',
+          expiresAt: '',
+        },
         embedding: {
           apiKey: '',
           baseURL: base.ai.embedding.baseURL || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -740,11 +891,13 @@ class AdminServer {
       weiboCookie: Boolean(configForUser.sources.weibo.cookie),
       embeddingApiKey: this.credentialUsable(Boolean(configForUser.ai.embedding.apiKey), credentialChecks.embedding),
       deepseekApiKey: this.credentialUsable(Boolean(configForUser.ai.deepseek.apiKey), credentialChecks.deepseek),
+      cloudToken: this.credentialUsable(Boolean(configForUser.ai.cloud.token), credentialChecks.cloud),
     };
 
     clone.lark.appSecret = '';
     clone.ai.embedding.apiKey = '';
     clone.ai.deepseek.apiKey = '';
+    clone.ai.cloud.token = '';
     clone.sources.zhihu.cookie = '';
     clone.sources.douyin.cookie = '';
     clone.sources.douyin.tiktokDownloaderToken = '';
@@ -777,6 +930,7 @@ class AdminServer {
       weibo: checks.weibo || null,
       embedding: checks.embedding || null,
       deepseek: checks.deepseek || null,
+      cloud: checks.cloud || null,
     };
   }
 
@@ -1274,6 +1428,54 @@ class AdminServer {
                   </summary>
                   <div class="mt-4 space-y-5">
                     <p class="text-sm text-gray-600">只想先跑起来可以跳过；补上以后，Spark 才会自动筛选内容并生成草稿。</p>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <label class="rounded-lg border border-blue-200 bg-blue-50 p-4 cursor-pointer">
+                        <div class="flex items-start gap-3">
+                          <input type="radio" name="configAiMode" value="cloud" class="mt-1" onchange="renderAiMode()">
+                          <div>
+                            <div class="font-semibold text-gray-900">Spark Cloud</div>
+                            <div class="mt-1 text-xs text-gray-600">用邮箱注册登录，先走服务端共享额度。</div>
+                          </div>
+                        </div>
+                      </label>
+                      <label class="rounded-lg border border-gray-200 bg-white p-4 cursor-pointer">
+                        <div class="flex items-start gap-3">
+                          <input type="radio" name="configAiMode" value="local" class="mt-1" onchange="renderAiMode()">
+                          <div>
+                            <div class="font-semibold text-gray-900">自带 API Key</div>
+                            <div class="mt-1 text-xs text-gray-600">使用你自己的阿里云百炼和 DeepSeek Key。</div>
+                          </div>
+                        </div>
+                      </label>
+                    </div>
+                    <div id="configCloudAiPanel" class="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                      <div class="mb-3">
+                        <label class="block text-sm font-semibold text-gray-900">Spark Cloud 账号</label>
+                        <p class="mt-1 text-xs text-gray-600">登录后，内容筛选和草稿生成都通过 Spark Cloud 代理。</p>
+                      </div>
+                      <input id="configCloudBaseUrl" type="hidden">
+                      <div id="configCloudSignedOut" class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <input id="configCloudEmail" type="email" class="px-3 py-2 border border-blue-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="邮箱">
+                        <input id="configCloudPassword" type="password" class="px-3 py-2 border border-blue-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="密码（至少 8 位）">
+                        <div class="flex gap-2">
+                          <button onclick="cloudAuth('login')" class="flex-1 px-3 py-2 text-sm rounded-md bg-blue-600 text-white hover:bg-blue-700">登录</button>
+                          <button onclick="cloudAuth('register')" class="flex-1 px-3 py-2 text-sm rounded-md border border-blue-300 text-blue-700 hover:bg-blue-100">创建账号</button>
+                        </div>
+                      </div>
+                      <div id="configCloudSignedIn" class="hidden rounded-md border border-green-200 bg-green-50 p-3">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="min-w-0">
+                            <div id="configCloudSignedInEmail" class="truncate text-sm font-semibold text-gray-900"></div>
+                            <div id="configCloudSignedInMeta" class="mt-1 text-xs text-green-700"></div>
+                          </div>
+                          <button onclick="clearCredential('cloud')" class="shrink-0 px-3 py-2 text-sm rounded-md border border-green-300 text-green-700 hover:bg-green-100">退出登录</button>
+                        </div>
+                      </div>
+                      <div class="mt-3">
+                        <p id="configCloudStatus" class="text-xs text-gray-600">未登录</p>
+                      </div>
+                    </div>
+                    <div id="configLocalAiPanel" class="space-y-5">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
                         <div class="mb-3">
@@ -1317,6 +1519,7 @@ class AdminServer {
                         </div>
                       </div>
                     </details>
+                    </div>
                   </div>
                 </details>
 
@@ -2140,6 +2343,11 @@ class AdminServer {
     }
 
     function credentialReady(config, kind) {
+      if (config.ai?.mode === 'cloud' || kind === 'cloud') {
+        const hasCloud = Boolean(config.credentialStatus?.cloudToken);
+        const cloudCheck = credentialCheck(config, 'cloud');
+        return hasCloud && cloudCheck?.status !== 'invalid';
+      }
       const hasKey = kind === 'embedding'
         ? Boolean(config.credentialStatus?.embeddingApiKey)
         : Boolean(config.credentialStatus?.deepseekApiKey);
@@ -2185,10 +2393,12 @@ class AdminServer {
       const container = document.getElementById('aiHealthGrid');
       if (!container) return;
 
-      const items = [
-        aiHealth('embedding', '内容智能筛选', '从抓到的内容里挑出最可能值得看的'),
-        aiHealth('deepseek', 'AI 自动写草稿', '为推荐内容生成短、中、长三种草稿'),
-      ];
+      const items = config.ai?.mode === 'cloud'
+        ? [aiHealth('cloud', 'Spark Cloud AI', '内容筛选和草稿生成都走 Spark Cloud')]
+        : [
+          aiHealth('embedding', '内容智能筛选', '从抓到的内容里挑出最可能值得看的'),
+          aiHealth('deepseek', 'AI 自动写草稿', '为推荐内容生成短、中、长三种草稿'),
+        ];
 
       container.innerHTML = items.map(item => \`
         <div class="border \${item.border} \${item.bg} rounded-lg p-3">
@@ -2210,7 +2420,9 @@ class AdminServer {
       \`).join('');
 
       function aiHealth(kind, label, description) {
-        const hasKey = kind === 'embedding'
+        const hasKey = kind === 'cloud'
+          ? Boolean(config.credentialStatus?.cloudToken)
+          : kind === 'embedding'
           ? Boolean(config.credentialStatus?.embeddingApiKey)
           : Boolean(config.credentialStatus?.deepseekApiKey);
         const check = credentialCheck(config, kind);
@@ -2223,7 +2435,7 @@ class AdminServer {
             bg: 'bg-yellow-50',
             border: 'border-yellow-100',
             text: 'text-yellow-700',
-            message: '未配置，相关能力会降级',
+            message: kind === 'cloud' ? '未登录，登录后可使用共享 AI 额度' : '未配置，相关能力会降级',
             canValidate: false,
           };
         }
@@ -2236,8 +2448,8 @@ class AdminServer {
             bg: 'bg-green-50',
             border: 'border-green-100',
             text: 'text-green-700',
-            message: check.message || '已验证可用',
-            canValidate: true,
+            message: kind === 'cloud' ? '已登录，AI 能力可用' : check.message || '已验证可用',
+            canValidate: kind !== 'cloud',
           };
         }
         if (check?.status === 'invalid') {
@@ -2249,8 +2461,8 @@ class AdminServer {
             bg: 'bg-red-50',
             border: 'border-red-100',
             text: 'text-red-700',
-            message: check.message || '密钥不可用',
-            canValidate: true,
+            message: check.message || (kind === 'cloud' ? '登录已失效，请重新登录' : '密钥不可用'),
+            canValidate: kind !== 'cloud',
           };
         }
         return {
@@ -2261,8 +2473,8 @@ class AdminServer {
           bg: 'bg-blue-50',
           border: 'border-blue-100',
           text: 'text-blue-700',
-          message: check?.message || '已保存，建议验证一次',
-          canValidate: true,
+          message: kind === 'cloud' ? '已登录，运行时会自动检查额度' : check?.message || '已保存，建议验证一次',
+          canValidate: kind !== 'cloud',
         };
       }
     }
@@ -2639,28 +2851,65 @@ class AdminServer {
     }
 
     function renderAiCredentialStatus(kind, config) {
-      const elementId = kind === 'embedding' ? 'configEmbeddingStatus' : 'configDeepseekStatus';
-      const label = kind === 'embedding' ? '内容智能筛选' : 'AI 自动写草稿';
-      const hasKey = kind === 'embedding'
-        ? Boolean(config.credentialStatus?.embeddingApiKey)
-        : Boolean(config.credentialStatus?.deepseekApiKey);
+      const meta = {
+        embedding: {
+          elementId: 'configEmbeddingStatus',
+          label: '内容智能筛选',
+          hasKey: Boolean(config.credentialStatus?.embeddingApiKey),
+        },
+        deepseek: {
+          elementId: 'configDeepseekStatus',
+          label: 'AI 自动写草稿',
+          hasKey: Boolean(config.credentialStatus?.deepseekApiKey),
+        },
+        cloud: {
+          elementId: 'configCloudStatus',
+          label: 'Spark Cloud',
+          hasKey: Boolean(config.credentialStatus?.cloudToken),
+        },
+      }[kind];
+      if (!meta) return;
+      const { elementId, label, hasKey } = meta;
       const check = credentialCheck(config, kind);
       const element = document.getElementById(elementId);
       if (!element) return;
 
+      if (kind === 'cloud') {
+        if (!hasKey) {
+          element.textContent = check?.status === 'invalid' ? check.message : '未登录，登录后可使用共享 AI 额度';
+          element.className = 'mt-1 text-xs text-gray-600';
+        } else if (check?.status === 'invalid') {
+          element.textContent = check.message || '登录已失效，请重新登录';
+          element.className = 'mt-1 text-xs text-red-700';
+        } else if (check?.status === 'valid') {
+          element.textContent = '已登录，AI 能力可用';
+          element.className = 'mt-1 text-xs text-green-700';
+        } else {
+          element.textContent = '已登录，运行时会自动检查额度';
+          element.className = 'mt-1 text-xs text-blue-700';
+        }
+        return;
+      }
+
       if (!hasKey) {
-        element.textContent = check?.status === 'invalid' ? check.message : \`\${label}密钥未配置\`;
+        element.textContent = check?.status === 'invalid' ? check.message : \`\${label}未连接\`;
         element.className = 'mt-1 text-xs text-gray-500';
       } else if (check?.status === 'valid') {
-        element.textContent = check.message || \`\${label}密钥可用\`;
+        element.textContent = check.message || \`\${label}可用\`;
         element.className = 'mt-1 text-xs text-green-700';
       } else if (check?.status === 'invalid') {
-        element.textContent = check.message || \`\${label}密钥不可用\`;
+        element.textContent = check.message || \`\${label}不可用\`;
         element.className = 'mt-1 text-xs text-red-700';
       } else {
-        element.textContent = check?.message || \`\${label}密钥已保存，建议验证一次\`;
+        element.textContent = check?.message || \`\${label}已保存，建议验证一次\`;
         element.className = 'mt-1 text-xs text-yellow-700';
       }
+    }
+
+    function renderAiMode() {
+      const mode = document.querySelector('input[name="configAiMode"]:checked')?.value || 'local';
+      document.getElementById('configCloudAiPanel')?.classList.toggle('hidden', mode !== 'cloud');
+      document.getElementById('configLocalAiPanel')?.classList.toggle('hidden', mode !== 'local');
     }
 
     function platformStatusBadge(platform, isEnabled, hasAuth, check) {
@@ -2876,6 +3125,15 @@ class AdminServer {
       document.getElementById('configProfilePath').value = config.profilePath || '';
 
       // AI
+      document.querySelectorAll('input[name="configAiMode"]').forEach(input => {
+        input.checked = input.value === (config.ai?.mode || 'local');
+      });
+      document.getElementById('configCloudBaseUrl').value = config.ai?.cloud?.baseURL || 'http://127.0.0.1:8787';
+      document.getElementById('configCloudEmail').value = config.ai?.cloud?.email || '';
+      document.getElementById('configCloudPassword').value = '';
+      renderAiCredentialStatus('cloud', config);
+      renderCloudAccountPanel(config);
+      renderAiMode();
       document.getElementById('configEmbeddingBaseUrl').value = config.ai?.embedding?.baseURL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
       document.getElementById('configEmbeddingModel').value = config.ai?.embedding?.model || 'text-embedding-v4';
       document.getElementById('configDeepseekBaseUrl').value = config.ai?.deepseek?.baseURL || 'https://api.deepseek.com';
@@ -2969,6 +3227,12 @@ class AdminServer {
         if (deepseekApiKey) {
           aiConfig.deepseek.apiKey = deepseekApiKey;
         }
+        aiConfig.mode = document.querySelector('input[name="configAiMode"]:checked')?.value || 'local';
+        aiConfig.cloud = {
+          ...currentConfig.ai?.cloud,
+          baseURL: document.getElementById('configCloudBaseUrl').value,
+          email: document.getElementById('configCloudEmail').value
+        };
         const sourcesConfig = {
           ...currentConfig.sources,
           zhihu: {
@@ -3205,11 +3469,60 @@ class AdminServer {
       }
     }
 
+    async function cloudAuth(action) {
+      try {
+        const id = currentUserId;
+        const payload = {
+          baseURL: document.getElementById('configCloudBaseUrl').value,
+          email: document.getElementById('configCloudEmail').value,
+          password: document.getElementById('configCloudPassword').value
+        };
+        if (!payload.email || !payload.password) {
+          showToast('请输入邮箱和密码', 'error');
+          return;
+        }
+
+        const data = await request(\`/api/users/\${encodeURIComponent(id)}/cloud/\${action}\`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        currentConfig = data;
+        document.getElementById('config').value = JSON.stringify(data, null, 2);
+        loadConfigIntoForm(data);
+        updateOverview(data);
+        await loadUsers();
+        showToast(action === 'register' ? '注册并登录成功' : '登录成功');
+      } catch (error) {
+        console.error('Spark Cloud auth failed:', error);
+      }
+    }
+
+    function renderCloudAccountPanel(config) {
+      const signedIn = Boolean(config.credentialStatus?.cloudToken);
+      const signedOutPanel = document.getElementById('configCloudSignedOut');
+      const signedInPanel = document.getElementById('configCloudSignedIn');
+      const email = config.ai?.cloud?.email || '';
+      const expiresAt = config.ai?.cloud?.expiresAt || '';
+      signedOutPanel?.classList.toggle('hidden', signedIn);
+      signedInPanel?.classList.toggle('hidden', !signedIn);
+      const emailElement = document.getElementById('configCloudSignedInEmail');
+      const metaElement = document.getElementById('configCloudSignedInMeta');
+      if (emailElement) {
+        emailElement.textContent = email || '已登录 Spark Cloud';
+      }
+      if (metaElement) {
+        metaElement.textContent = expiresAt
+          ? \`登录有效期至 \${new Date(expiresAt).toLocaleString()}\`
+          : '默认登录有效期 30 天';
+      }
+    }
+
     async function clearCredential(kind) {
       try {
         const labels = {
           embedding: '内容智能筛选密钥',
-          deepseek: 'AI 自动写草稿密钥'
+          deepseek: 'AI 自动写草稿密钥',
+          cloud: 'Spark Cloud 登录状态'
         };
         if (!confirm(\`清空 \${labels[kind] || kind}？\`)) {
           return;

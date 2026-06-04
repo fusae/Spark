@@ -1,11 +1,12 @@
 import OpenAI from 'openai';
 import { logger } from '../utils/logger.js';
+import type { ChatClient, ChatOptions } from './types.js';
 
 /**
  * DeepSeek 客户端
  * 用于深度分析账号画像，提取更细粒度的风格特征
  */
-export class DeepSeekClient {
+export class DeepSeekClient implements ChatClient {
   private client: OpenAI;
   private model: string = 'deepseek-chat';
 
@@ -150,11 +151,7 @@ ${sampleTweets.map((tweet, i) => `${i + 1}. ${tweet}`).join('\n\n')}
    */
   async chat(
     prompt: string,
-    options?: {
-      temperature?: number;
-      maxTokens?: number;
-      systemPrompt?: string;
-    }
+    options?: ChatOptions
   ): Promise<string> {
     try {
       const response = await this.client.chat.completions.create({
@@ -171,6 +168,7 @@ ${sampleTweets.map((tweet, i) => `${i + 1}. ${tweet}`).join('\n\n')}
         ],
         temperature: options?.temperature ?? 0.7,
         max_tokens: options?.maxTokens,
+        response_format: options?.responseFormat ? { type: options.responseFormat } : undefined,
       });
 
       return response.choices[0].message.content || '';

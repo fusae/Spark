@@ -1,4 +1,5 @@
 import { EmbeddingClient } from '../ai/embedding.js';
+import type { EmbeddingProvider } from '../ai/types.js';
 import { AccountProfile } from './types.js';
 import { logger } from '../utils/logger.js';
 
@@ -7,14 +8,16 @@ import { logger } from '../utils/logger.js';
  * 负责将账号画像转换为 embedding 向量
  */
 export class Vectorizer {
-  private embeddingClient: EmbeddingClient;
+  private embeddingClient: EmbeddingProvider;
 
-  constructor(embeddingApiKey: string, embeddingBaseURL?: string, embeddingModel?: string) {
-    this.embeddingClient = new EmbeddingClient(
-      embeddingApiKey,
-      embeddingBaseURL,
-      embeddingModel
-    );
+  constructor(
+    embeddingApiKeyOrClient: string | EmbeddingProvider,
+    embeddingBaseURL?: string,
+    embeddingModel?: string
+  ) {
+    this.embeddingClient = typeof embeddingApiKeyOrClient === 'string'
+      ? new EmbeddingClient(embeddingApiKeyOrClient, embeddingBaseURL, embeddingModel)
+      : embeddingApiKeyOrClient;
     logger.info('Vectorizer initialized');
   }
 
@@ -31,7 +34,9 @@ export class Vectorizer {
       logger.debug(`Combined text for vectorization: ${combinedText}`);
 
       // 生成 embedding 向量
-      const vector = await this.embeddingClient.getEmbeddingWithRetry(combinedText);
+      const vector = this.embeddingClient.getEmbeddingWithRetry
+        ? await this.embeddingClient.getEmbeddingWithRetry(combinedText)
+        : await this.embeddingClient.getEmbedding(combinedText);
 
       logger.info(`Profile vectorized successfully (${vector.length} dimensions)`);
       return vector;
