@@ -8,6 +8,16 @@ import { RecoverableFailure } from '../utils/failure.js';
 import { asRecoverableFailure, probeCookieSession } from './session-probes.js';
 import type { RateLimiter } from '../utils/rate-limiter.js';
 import type { XiaohongshuSourceRuntimeConfig } from '../types/runtime-config.js';
+import {
+  compileRuleRegex,
+  PlatformScraperRulePayload,
+  renderRuleTemplate,
+  ruleNumber,
+  ruleNumberList,
+  ruleRecord,
+  ruleString,
+  ruleStringList,
+} from './rules.js';
 import type { Page } from 'puppeteer';
 
 type CookieSource = 'chrome' | 'safari' | 'firefox';
@@ -78,8 +88,13 @@ export class XiaohongshuScraper extends BaseScraper {
 
   private sourceConfig: XiaohongshuSourceRuntimeConfig;
   private keywords: string[];
+  private scraperRule: PlatformScraperRulePayload;
 
-  constructor(rateLimiter: RateLimiter, sourceConfig?: XiaohongshuSourceRuntimeConfig) {
+  constructor(
+    rateLimiter: RateLimiter,
+    sourceConfig?: XiaohongshuSourceRuntimeConfig,
+    scraperRule: PlatformScraperRulePayload = {}
+  ) {
     super(rateLimiter);
     this.sourceConfig = sourceConfig || {
       userId: process.env.USER_ID || 'local',
@@ -91,6 +106,7 @@ export class XiaohongshuScraper extends BaseScraper {
       chromeProfile: config.chineseSources.xiaohongshuChromeProfile,
     };
     this.keywords = this.sourceConfig.keywords;
+    this.scraperRule = scraperRule;
   }
 
   async scrape(): Promise<ContentItem[]> {
@@ -236,21 +252,32 @@ export class XiaohongshuScraper extends BaseScraper {
 
     let browser;
     try {
+      const browserRule = ruleRecord(this.scraperRule.browser);
       browser = await launchLocalBrowser('xiaohongshu', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       const responsePromise = this.waitForBrowserSearchResponse(page);
+      const searchUrl = renderRuleTemplate(
+        ruleString(browserRule.searchUrlTemplate, `${this.baseUrl}/search_result?keyword={{keyword}}&source=web_search_result_notes`),
+        { keyword }
+      );
       await page.goto(
-        `${this.baseUrl}/search_result?keyword=${encodeURIComponent(keyword)}&source=web_search_result_notes`,
+        searchUrl,
         { waitUntil: 'domcontentloaded', timeout: 60000 }
       );
 
-      const response = await this.withTimeout(responsePromise, 30000, null);
+      const response = await this.withTimeout(responsePromise, ruleNumber(browserRule.responseTimeoutMs, 30000), null);
       if (!response) {
         const pageText = await page
           .evaluate(() => document.body.innerText || '')
           .catch(() => '');
-        const needsCaptcha = /验证码|安全验证|滑块|请完成验证|captcha|verify/i.test(pageText);
-        const needsLogin = /登录后查看搜索结果|手机号登录|扫码/.test(pageText);
+        const needsCaptcha = compileRuleRegex(
+          browserRule.challengeTextRegex,
+          /验证码|安全验证|滑块|请完成验证|captcha|verify/i
+        ).test(pageText);
+        const needsLogin = compileRuleRegex(
+          browserRule.loginTextRegex,
+          /登录后查看搜索结果|手机号登录|扫码/i
+        ).test(pageText);
         if (needsCaptcha) {
           throw this.captchaFailure();
         }
@@ -313,7 +340,13 @@ export class XiaohongshuScraper extends BaseScraper {
 
   private isCaptchaResponse(response: XiaohongshuSearchResponse): boolean {
     const message = response.msg || '';
-    return response.code === 216 || /captcha|验证码|安全验证|滑块|风控|risk control|risk_control|type=216|verify/i.test(message);
+    const apiRule = ruleRecord(this.scraperRule.api);
+    const captchaCodes = ruleNumberList(apiRule.captchaStatusCodes, [216]);
+    const captchaRegex = compileRuleRegex(
+      apiRule.captchaMessageRegex,
+      /captcha|验证码|安全验证|滑块|风控|risk control|risk_control|type=216|verify/i
+    );
+    return (typeof response.code === 'number' && captchaCodes.includes(response.code)) || captchaRegex.test(message);
   }
 
   private waitForBrowserSearchResponse(page: Page): Promise<XiaohongshuSearchResponse | null> {
@@ -333,7 +366,9 @@ export class XiaohongshuScraper extends BaseScraper {
     removeListener: () => void,
     resolve: (value: XiaohongshuSearchResponse | null) => void
   ): Promise<void> {
-    if (!response.url().includes('/api/sns/web/v1/search/')) {
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const responseUrlIncludes = ruleStringList(browserRule.responseUrlIncludes, ['/api/sns/web/v1/search/']);
+    if (!responseUrlIncludes.some((pattern) => response.url().includes(pattern))) {
       return;
     }
 
@@ -343,7 +378,11 @@ export class XiaohongshuScraper extends BaseScraper {
   }
 
   private async fetchSearchPage(keyword: string): Promise<string> {
-    const url = `${this.baseUrl}/search_result?keyword=${encodeURIComponent(keyword)}&source=web_search_result_notes`;
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const url = renderRuleTemplate(
+      ruleString(browserRule.searchUrlTemplate, `${this.baseUrl}/search_result?keyword={{keyword}}&source=web_search_result_notes`),
+      { keyword }
+    );
 
     return retry(
       async () => {
@@ -366,24 +405,28 @@ export class XiaohongshuScraper extends BaseScraper {
   }
 
   private async fetchSearchApi(keyword: string): Promise<XiaohongshuSearchResponse> {
-    const url = 'https://edith.xiaohongshu.com/api/sns/web/v1/search/notes';
+    const apiRule = ruleRecord(this.scraperRule.api);
+    const url = ruleString(apiRule.searchUrl, 'https://edith.xiaohongshu.com/api/sns/web/v1/search/notes');
+    const body = {
+      keyword,
+      page: 1,
+      page_size: 20,
+      search_id: '',
+      sort: 'popularity_descending',
+      note_type: 0,
+      ext_flags: [],
+      filters: [],
+      geo: '',
+      ...ruleRecord(apiRule.body),
+    };
+    body.keyword = keyword;
 
     return retry(
       async () => {
         logger.debug(`Fetching: ${url}`);
         const response = await this.axiosInstance.post<XiaohongshuSearchResponse>(
           url,
-          {
-            keyword,
-            page: 1,
-            page_size: 20,
-            search_id: '',
-            sort: 'popularity_descending',
-            note_type: 0,
-            ext_flags: [],
-            filters: [],
-            geo: '',
-          },
+          body,
           {
             headers: this.buildJsonHeaders(`${this.baseUrl}/search_result?keyword=${encodeURIComponent(keyword)}`),
           }

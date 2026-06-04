@@ -18,6 +18,7 @@ import {
 import { localRuntimeConfig } from '../config.js';
 import type { SourceName, UserRuntimeConfig } from '../types/runtime-config.js';
 import { classifyFailure, FailureInfo } from '../utils/failure.js';
+import type { ScraperRuleSet } from '../scrapers/rules.js';
 import crypto from 'crypto';
 
 export interface AggregationProgressEvent {
@@ -29,6 +30,7 @@ export type AggregationProgressCallback = (event: AggregationProgressEvent) => v
 
 interface ContentAggregatorOptions {
   localBrowserHeadless?: boolean;
+  scraperRules?: ScraperRuleSet;
 }
 
 /**
@@ -73,14 +75,14 @@ export class ContentAggregator {
           ...sourceConfig.douyin,
           userId: runtimeConfig.userId,
           browserHeadless: this.options.localBrowserHeadless,
-        })]
+        }, this.options.scraperRules?.douyin?.payload)]
         : null,
       sourceConfig.xiaohongshu.enabled
         ? ['xiaohongshu', new XiaohongshuScraper(this.rateLimiter, {
           ...sourceConfig.xiaohongshu,
           userId: runtimeConfig.userId,
           browserHeadless: this.options.localBrowserHeadless,
-        })]
+        }, this.options.scraperRules?.xiaohongshu?.payload)]
         : null,
       sourceConfig.weibo.enabled
         ? ['weibo', new WeiboScraper(this.rateLimiter, {

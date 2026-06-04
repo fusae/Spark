@@ -8,6 +8,16 @@ import { RecoverableFailure } from '../utils/failure.js';
 import { probeCookieSession } from './session-probes.js';
 import type { RateLimiter } from '../utils/rate-limiter.js';
 import type { DouyinSourceRuntimeConfig } from '../types/runtime-config.js';
+import {
+  compileRuleRegex,
+  PlatformScraperRulePayload,
+  renderRuleTemplate,
+  ruleNumber,
+  ruleNumberList,
+  ruleRecord,
+  ruleString,
+  ruleStringList,
+} from './rules.js';
 import type { Page } from 'puppeteer';
 
 interface DouyinHotResponse {
@@ -67,8 +77,13 @@ export class DouyinScraper extends BaseScraper {
   protected healthCheckKeywords = [];
   private sourceConfig: DouyinSourceRuntimeConfig;
   private keywords: string[];
+  private scraperRule: PlatformScraperRulePayload;
 
-  constructor(rateLimiter: RateLimiter, sourceConfig?: DouyinSourceRuntimeConfig) {
+  constructor(
+    rateLimiter: RateLimiter,
+    sourceConfig?: DouyinSourceRuntimeConfig,
+    scraperRule: PlatformScraperRulePayload = {}
+  ) {
     super(rateLimiter);
     this.sourceConfig = sourceConfig || {
       userId: process.env.USER_ID || 'local',
@@ -79,6 +94,7 @@ export class DouyinScraper extends BaseScraper {
       tiktokDownloaderToken: config.chineseSources.douyinTikTokDownloaderToken,
     };
     this.keywords = this.sourceConfig.keywords;
+    this.scraperRule = scraperRule;
   }
 
   protected healthCheckUrl(): string {
@@ -216,6 +232,7 @@ export class DouyinScraper extends BaseScraper {
   }
 
   private async searchByKeyword(keyword: string): Promise<DouyinSearchResponse> {
+    const apiRule = ruleRecord(this.scraperRule.api);
     const params = new URLSearchParams({
       device_platform: 'webapp',
       aid: '6383',
@@ -228,7 +245,15 @@ export class DouyinScraper extends BaseScraper {
       count: '20',
       offset: '0',
     });
-    const url = `${this.baseUrl}/aweme/v1/web/search/item/?${params.toString()}`;
+    const query = ruleRecord(apiRule.query);
+    for (const [key, value] of Object.entries(query)) {
+      params.set(key, String(value));
+    }
+    const defaultUrl = `${this.baseUrl}/aweme/v1/web/search/item/`;
+    const searchUrl = ruleString(apiRule.searchUrl, defaultUrl);
+    const url = `${searchUrl}?${params.toString()}`;
+    const authStatusCodes = ruleNumberList(apiRule.authStatusCodes, [8, 2483]);
+    const captchaStatusCodes = ruleNumberList(apiRule.captchaStatusCodes, []);
 
     return retry(
       async () => {
@@ -237,8 +262,11 @@ export class DouyinScraper extends BaseScraper {
           headers: this.buildJsonHeaders(`${this.baseUrl}/search/${encodeURIComponent(keyword)}?type=general`),
         });
 
-        if (response.data.status_code === 2483) {
+        if (response.data.status_code && authStatusCodes.includes(response.data.status_code)) {
           throw new RecoverableFailure('auth_required', '抖音登录态失效，需要重新登录', true, '重新登录');
+        }
+        if (response.data.status_code && captchaStatusCodes.includes(response.data.status_code)) {
+          throw new RecoverableFailure('captcha_required', '抖音触发滑块验证码或风控，需要人工验证', true, '处理验证');
         }
 
         return response.data;
@@ -272,17 +300,24 @@ export class DouyinScraper extends BaseScraper {
 
     let browser;
     try {
+      const browserRule = ruleRecord(this.scraperRule.browser);
       browser = await launchLocalBrowser('douyin', this.sourceConfig.userId, this.sourceConfig.browserHeadless);
       const page = await browser.newPage();
       const responsePromise = this.waitForBrowserSearchResponse(page, keyword);
+      const searchUrl = renderRuleTemplate(
+        ruleString(browserRule.searchUrlTemplate, `${this.baseUrl}/search/{{keyword}}?type=general`),
+        { keyword }
+      );
+      const initialWaitMs = this.waitRange(browserRule.initialWaitMs, [5000, 7000]);
+      const afterScrollWaitMs = this.waitRange(browserRule.afterScrollWaitMs, [1200, 1800]);
 
       await page.goto(
-        `${this.baseUrl}/search/${encodeURIComponent(keyword)}?type=general`,
+        searchUrl,
         { waitUntil: 'domcontentloaded', timeout: 60000 }
       );
-      await this.randomDelay(5000, 7000);
-      await page.mouse.wheel({ deltaY: 1600 }).catch(() => undefined);
-      await this.randomDelay(1200, 1800);
+      await this.randomDelay(initialWaitMs[0], initialWaitMs[1]);
+      await page.mouse.wheel({ deltaY: ruleNumber(browserRule.scrollDelta, 1600) }).catch(() => undefined);
+      await this.randomDelay(afterScrollWaitMs[0], afterScrollWaitMs[1]);
 
       const initialDomItems = await this.extractBrowserSearchItems(page, keyword);
       if (initialDomItems.length > 0) {
@@ -297,7 +332,7 @@ export class DouyinScraper extends BaseScraper {
         }
       }
 
-      const response = await this.withTimeout(responsePromise, 12000, null);
+      const response = await this.withTimeout(responsePromise, ruleNumber(browserRule.responseTimeoutMs, 12000), null);
       if (!response) {
         const domItems = await this.extractBrowserSearchItems(page, keyword);
         if (domItems.length > 0) {
@@ -313,10 +348,12 @@ export class DouyinScraper extends BaseScraper {
             )),
           }))
           .catch(() => ({ text: '', hasCaptcha: false }));
-        if (pageState.hasCaptcha || /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(pageState.text)) {
+        const captchaRegex = compileRuleRegex(browserRule.challengeTextRegex, /验证码|安全验证|滑块|请完成验证|风控|captcha/i);
+        const loginRegex = compileRuleRegex(browserRule.loginTextRegex, /登录|扫码|手机号/i);
+        if (pageState.hasCaptcha || captchaRegex.test(pageState.text)) {
           throw new RecoverableFailure('captcha_required', '抖音触发滑块验证码或风控，需要在登录窗口完成验证后重试', true, '处理验证');
         }
-        const needsLogin = /登录|扫码|手机号/.test(pageState.text);
+        const needsLogin = loginRegex.test(pageState.text);
         if (needsLogin) {
           throw new RecoverableFailure('auth_required', '抖音登录态失效，需要重新登录', true, '重新登录');
         }
@@ -354,18 +391,31 @@ export class DouyinScraper extends BaseScraper {
   }
 
   private async extractBrowserSearchItems(page: Page, keyword: string): Promise<ContentItem[]> {
-    const rows = await page.evaluate(() => {
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const linkSelectors = ruleStringList(browserRule.domLinkSelectors, [
+      'a[href*="/video/"]',
+      'a[href*="/note/"]',
+      'a[href*="/user/"]',
+    ]);
+    const cardSelectors = ruleStringList(browserRule.cardSelectors, [
+      'li',
+      'article',
+      '[class*="search-result"]',
+      '[class*="card"]',
+      '[class*="item"]',
+    ]);
+    const rows = await page.evaluate((selectors, cards) => {
       const seen = new Set<string>();
       const output: Array<{ id: string; url: string; title: string; author?: string; metricText?: string }> = [];
 
-      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/video/"], a[href*="/note/"], a[href*="/user/"]'))) {
+      for (const anchor of Array.from(document.querySelectorAll<HTMLAnchorElement>(selectors.join(',')))) {
         const url = anchor.href;
         const id = url.match(/\/(?:video|note)\/([^/?#]+)/)?.[1] || '';
         if (!id || seen.has(id)) {
           continue;
         }
 
-        const card = anchor.closest('li, article, [class*="search-result"], [class*="card"], [class*="item"]');
+        const card = anchor.closest(cards.join(','));
         const title = (
           anchor.getAttribute('aria-label') ||
           anchor.getAttribute('title') ||
@@ -429,7 +479,7 @@ export class DouyinScraper extends BaseScraper {
       }
 
       return output;
-    });
+    }, linkSelectors, cardSelectors);
 
     return rows
       .map((row) => ({
@@ -447,7 +497,15 @@ export class DouyinScraper extends BaseScraper {
   }
 
   private async hasBrowserChallenge(page: Page): Promise<boolean> {
-    return page.evaluate(() => {
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const challengeSelectors = ruleStringList(browserRule.challengeSelectors, [
+      '[class*="captcha"]',
+      'iframe[src*="captcha"]',
+      'iframe[src*="verify"]',
+      'iframe[src*="verifycenter"]',
+    ]);
+    const challengeRegex = compileRuleRegex(browserRule.challengeTextRegex, /验证码|安全验证|滑块|请完成验证|风控|captcha/i);
+    return page.evaluate((selectors, regexSource) => {
       const text = `${document.title}\n${document.body.innerText || ''}`;
       const isVisible = (element: Element) => {
         const rect = element.getBoundingClientRect();
@@ -458,13 +516,11 @@ export class DouyinScraper extends BaseScraper {
           style.visibility !== 'hidden' &&
           Number(style.opacity || '1') > 0.01;
       };
-      const visibleChallenge = Array.from(document.querySelectorAll(
-        '[class*="captcha"], iframe[src*="captcha"], iframe[src*="verify"], iframe[src*="verifycenter"]'
-      )).some(isVisible);
+      const visibleChallenge = Array.from(document.querySelectorAll(selectors.join(','))).some(isVisible);
 
-      return /验证码|安全验证|滑块|请完成验证|风控|captcha/i.test(text) ||
+      return new RegExp(regexSource, 'i').test(text) ||
         visibleChallenge;
-    }).catch(() => false);
+    }, challengeSelectors, challengeRegex.source).catch(() => false);
   }
 
   private parseDouyinMetric(value: string): number | undefined {
@@ -495,9 +551,11 @@ export class DouyinScraper extends BaseScraper {
     return Math.round(number);
   }
 
-  private async waitForBrowserSearchItems(page: Page, keyword: string, timeoutMs = 180_000): Promise<ContentItem[]> {
+  private async waitForBrowserSearchItems(page: Page, keyword: string, timeoutMs?: number): Promise<ContentItem[]> {
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const effectiveTimeout = timeoutMs || ruleNumber(browserRule.verificationWaitMs, 180_000);
     const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
+    while (Date.now() - startedAt < effectiveTimeout) {
       await this.randomDelay(2000, 3000);
       await page.mouse.wheel({ deltaY: 1200 }).catch(() => undefined);
       const items = await this.extractBrowserSearchItems(page, keyword);
@@ -544,9 +602,12 @@ export class DouyinScraper extends BaseScraper {
   }
 
   private isBrowserSearchResponseUrl(url: string, encodedKeyword: string): boolean {
-    const isSearchApi =
-      url.includes('/aweme/v1/web/general/search/stream/') ||
-      url.includes('/aweme/v1/web/general/search/single/');
+    const browserRule = ruleRecord(this.scraperRule.browser);
+    const responseUrlIncludes = ruleStringList(browserRule.responseUrlIncludes, [
+      '/aweme/v1/web/general/search/stream/',
+      '/aweme/v1/web/general/search/single/',
+    ]);
+    const isSearchApi = responseUrlIncludes.some((pattern) => url.includes(pattern));
     if (!isSearchApi) {
       return false;
     }
@@ -554,6 +615,14 @@ export class DouyinScraper extends BaseScraper {
     return url.includes(`keyword=${encodedKeyword}`) ||
       url.includes(`keyword=${encodedKeyword.toLowerCase()}`) ||
       url.includes(`keyword=${decodeURIComponent(encodedKeyword)}`);
+  }
+
+  private waitRange(value: unknown, fallback: [number, number]): [number, number] {
+    const numbers = ruleNumberList(value, fallback);
+    return [
+      Math.max(0, numbers[0] || fallback[0]),
+      Math.max(numbers[0] || fallback[0], numbers[1] || fallback[1]),
+    ];
   }
 
   private parseBrowserSearchResponse(text: string): DouyinSearchResponse | null {

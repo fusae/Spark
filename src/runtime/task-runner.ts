@@ -11,6 +11,7 @@ import { ProfileManager } from '../profile/index.js';
 import { sourceNames, UserRuntimeConfig } from '../types/runtime-config.js';
 import { logger } from '../utils/logger.js';
 import { classifyFailure } from '../utils/failure.js';
+import { CloudScraperRuleClient, ScraperRuleSet } from '../scrapers/rules.js';
 
 export interface RuntimeTaskResult {
   aggregation: Array<{
@@ -186,6 +187,8 @@ export class RuntimeTaskRunner {
     const filterEngine = new FilterEngine(aiClients.embedding, aiClients.chat, this.db, configForUser.userId);
     const draftGenerator = new DraftGenerator(aiClients.chat, aiClients.modelName);
 
+    const scraperRules = await this.loadScraperRules(configForUser, runLogId, progress);
+
     this.logStage(runLogId, progress, '抓取', 'running', sources ? '开始补抓失败平台' : '开始抓取所有已启用平台', {
       sources: sources || sourceNames.filter((source) => configForUser.sources[source].enabled),
     });
@@ -219,6 +222,7 @@ export class RuntimeTaskRunner {
       });
     }, {
       localBrowserHeadless: sources ? false : undefined,
+      scraperRules,
     });
     const aggregation = sources
       ? await aggregator.aggregateFrom(sources)
@@ -541,6 +545,42 @@ export class RuntimeTaskRunner {
       chat: deepseekClient,
       modelName: 'deepseek-chat',
     };
+  }
+
+  private async loadScraperRules(
+    configForUser: UserRuntimeConfig,
+    runLogId: number,
+    progress: RuntimeTaskProgress
+  ): Promise<ScraperRuleSet> {
+    const cloud = configForUser.ai.cloud;
+    if (!cloud?.baseURL || !cloud?.token) {
+      this.logStage(runLogId, progress, '规则同步', 'skipped', '未登录 Spark Cloud，使用客户端内置抓取规则');
+      return {};
+    }
+
+    try {
+      const client = new CloudScraperRuleClient({
+        baseURL: cloud.baseURL,
+        token: cloud.token,
+      });
+      const rules = await client.fetchRules();
+      const platforms = Object.keys(rules);
+      this.logStage(
+        runLogId,
+        progress,
+        '规则同步',
+        platforms.length > 0 ? 'succeeded' : 'skipped',
+        platforms.length > 0 ? `已同步 ${platforms.length} 个平台抓取规则` : 'Cloud 暂无下发规则，使用内置规则',
+        { platforms }
+      );
+      return rules;
+    } catch (error) {
+      logger.warn('Failed to load scraper rules from Spark Cloud, using built-in rules', error as Error);
+      this.logStage(runLogId, progress, '规则同步', 'skipped', '规则同步失败，使用客户端内置抓取规则', {
+        error: (error as Error).message,
+      });
+      return {};
+    }
   }
 
   private canGenerateEmbeddings(aiConfig: UserRuntimeConfig['ai']): boolean {
