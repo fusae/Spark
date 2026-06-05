@@ -11,7 +11,7 @@ import { ProfileManager } from '../profile/index.js';
 import { sourceNames, UserRuntimeConfig } from '../types/runtime-config.js';
 import { logger } from '../utils/logger.js';
 import { classifyFailure } from '../utils/failure.js';
-import { CloudScraperRuleClient, ScraperRuleSet } from '../scrapers/rules.js';
+import { CloudScraperRuleClient, ScraperFailureReport, ScraperRuleSet } from '../scrapers/rules.js';
 
 export interface RuntimeTaskResult {
   aggregation: Array<{
@@ -109,7 +109,7 @@ export class RuntimeTaskRunner {
       : '初始化运行环境');
 
     try {
-      const result = await this.executeDaily(configForUser, runLogId, progress, sources);
+      const result = await this.executeDaily(configForUser, runLogId, progress, jobType, sources);
       progress.result = result;
       const summary = this.buildSummary(progress, result);
       this.logStage(runLogId, progress, '完成', 'succeeded', summary, {
@@ -164,6 +164,7 @@ export class RuntimeTaskRunner {
     configForUser: UserRuntimeConfig,
     runLogId: number,
     progress: RuntimeTaskProgress,
+    jobType: 'daily_run' | 'source_recovery',
     sources?: string[]
   ): Promise<RuntimeTaskResult> {
     logger.info(`Runtime daily run started: ${configForUser.userId}`);
@@ -228,6 +229,7 @@ export class RuntimeTaskRunner {
       ? await aggregator.aggregateFrom(sources)
       : await aggregator.aggregateAll();
     progress.aggregation = this.formatAggregationStats(aggregation);
+    await this.reportScraperFailures(configForUser, jobType, aggregation, scraperRules, runLogId, progress);
     const totalCollected = aggregation.reduce((sum, stat) => sum + stat.itemsCollected, 0);
     const totalDeduped = aggregation.reduce((sum, stat) => sum + stat.itemsDeduped, 0);
     const totalSaved = aggregation.reduce((sum, stat) => sum + stat.itemsSaved, 0);
@@ -580,6 +582,57 @@ export class RuntimeTaskRunner {
         error: (error as Error).message,
       });
       return {};
+    }
+  }
+
+  private async reportScraperFailures(
+    configForUser: UserRuntimeConfig,
+    jobType: 'daily_run' | 'source_recovery',
+    stats: Awaited<ReturnType<ContentAggregator['aggregateAll']>>,
+    scraperRules: ScraperRuleSet,
+    runLogId: number,
+    progress: RuntimeTaskProgress
+  ): Promise<void> {
+    const cloud = configForUser.ai.cloud;
+    if (!cloud?.baseURL || !cloud?.token) {
+      return;
+    }
+
+    const failures: ScraperFailureReport[] = stats
+      .filter((stat) => stat.errors > 0)
+      .map((stat) => ({
+        source: stat.source,
+        failureType: stat.failureType,
+        userMessage: stat.userMessage,
+        actionLabel: stat.actionLabel,
+        recoverable: stat.recoverable,
+        errors: stat.errors,
+        itemsCollected: stat.itemsCollected,
+        itemsSaved: stat.itemsSaved,
+        durationMs: stat.duration,
+        ruleVersion: scraperRules[stat.source]?.version,
+      }));
+    if (failures.length === 0) {
+      return;
+    }
+
+    try {
+      const client = new CloudScraperRuleClient({
+        baseURL: cloud.baseURL,
+        token: cloud.token,
+      });
+      const accepted = await client.reportFailures({
+        jobType,
+        failures,
+      });
+      this.logStage(runLogId, progress, '失败上报', 'succeeded', `已上报 ${accepted} 个平台失败样本到 Spark Cloud`, {
+        platforms: failures.map((failure) => failure.source),
+      });
+    } catch (error) {
+      logger.warn('Failed to report scraper failures to Spark Cloud', error as Error);
+      this.logStage(runLogId, progress, '失败上报', 'skipped', '失败样本上报 Cloud 失败，主流程继续', {
+        error: (error as Error).message,
+      });
     }
   }
 

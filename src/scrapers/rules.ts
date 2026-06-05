@@ -27,6 +27,19 @@ interface CloudRulesResponse {
   error?: string;
 }
 
+export interface ScraperFailureReport {
+  source: string;
+  failureType?: string;
+  userMessage?: string;
+  actionLabel?: string;
+  recoverable?: boolean;
+  errors?: number;
+  itemsCollected?: number;
+  itemsSaved?: number;
+  durationMs?: number;
+  ruleVersion?: string;
+}
+
 export class CloudScraperRuleClient {
   private baseURL: string;
   private token: string;
@@ -56,6 +69,34 @@ export class CloudScraperRuleClient {
     const rules = Array.isArray(data.rules) ? data.rules : [];
     logger.info(`Loaded ${rules.length} scraper rules from Spark Cloud`);
     return Object.fromEntries(rules.map((rule) => [rule.platform, rule]));
+  }
+
+  async reportFailures(input: {
+    jobType: string;
+    failures: ScraperFailureReport[];
+    clientVersion?: string;
+  }): Promise<number> {
+    if (!this.baseURL || !this.token || input.failures.length === 0) {
+      return 0;
+    }
+
+    const response = await fetch(`${this.baseURL}/api/rule-failures`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${this.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        jobType: input.jobType,
+        clientVersion: input.clientVersion || process.env.npm_package_version || 'dev',
+        failures: input.failures,
+      }),
+    });
+    const data = await response.json().catch(() => ({})) as { accepted?: number; error?: string };
+    if (!response.ok) {
+      throw new Error(data.error || `失败上报失败：${response.status}`);
+    }
+    return Number(data.accepted || 0);
   }
 }
 
