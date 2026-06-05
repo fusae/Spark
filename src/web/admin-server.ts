@@ -2572,6 +2572,11 @@ class AdminServer {
           .filter(item => Number(item.errors || 0) > 0)
           .map(item => item.source)
       );
+      const successfulSources = new Set(
+        aggregation
+          .filter(item => Number(item.errors || 0) === 0 && Number(item.itemsCollected || 0) > 0)
+          .map(item => item.source)
+      );
 
       platforms.forEach(platform => {
         const enabled = Boolean(config.sources?.[platform.id]?.enabled);
@@ -2595,7 +2600,7 @@ class AdminServer {
               action: loginRecoveryAction(platform.id, 'auth_required'),
               actionLabel: '重新登录',
             });
-          } else if (check?.status !== 'valid') {
+          } else if (check?.status !== 'valid' && !successfulSources.has(platform.id)) {
             add({
               key: \`\${platform.id}:unknown-auth\`,
               message: \`\${platform.name} 登录状态待检查\`,
@@ -2623,10 +2628,13 @@ class AdminServer {
           });
         });
 
-      [
-        ['embedding', '内容智能筛选', config.credentialStatus?.embeddingApiKey],
-        ['deepseek', 'AI 自动写草稿', config.credentialStatus?.deepseekApiKey],
-      ].forEach(([kind, label, hasKey]) => {
+      const aiCredentials = config.ai?.mode === 'cloud'
+        ? [['cloud', 'Spark Cloud AI', config.credentialStatus?.cloudToken]]
+        : [
+          ['embedding', '内容智能筛选', config.credentialStatus?.embeddingApiKey],
+          ['deepseek', 'AI 自动写草稿', config.credentialStatus?.deepseekApiKey],
+        ];
+      aiCredentials.forEach(([kind, label, hasKey]) => {
         const check = credentialCheck(config, kind);
         if (!hasKey) {
           add({
@@ -2847,7 +2855,23 @@ class AdminServer {
     }
 
     function credentialCheck(config, platformId) {
-      return config.credentialChecks?.[platformId] || null;
+      const check = config.credentialChecks?.[platformId] || null;
+      if (check?.status === 'valid' || check?.status === 'invalid') {
+        return check;
+      }
+
+      const stat = Array.isArray(overviewRunStats.aggregation)
+        ? overviewRunStats.aggregation.find(item => item.source === platformId)
+        : null;
+      if (stat && Number(stat.errors || 0) === 0 && Number(stat.itemsCollected || 0) > 0) {
+        return {
+          status: 'valid',
+          message: '本次抓取成功，共抓到 ' + Number(stat.itemsCollected) + ' 条内容',
+          checkedAt: '',
+        };
+      }
+
+      return check;
     }
 
     function renderAiCredentialStatus(kind, config) {

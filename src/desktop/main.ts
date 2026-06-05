@@ -73,6 +73,7 @@ function runtimeEnv(port: number): NodeJS.ProcessEnv {
   const env = { ...process.env };
   env.ADMIN_HOST = '127.0.0.1';
   env.ADMIN_PORT = String(port);
+  env.SPARK_CLIENT_VERSION = app.getVersion();
   applySystemProxyEnv(env);
 
   if (app.isPackaged) {

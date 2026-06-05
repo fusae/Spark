@@ -27,6 +27,10 @@ interface CloudRulesResponse {
   error?: string;
 }
 
+function clientVersion(): string {
+  return process.env.SPARK_CLIENT_VERSION || process.env.npm_package_version || 'dev';
+}
+
 export interface ScraperFailureReport {
   source: string;
   failureType?: string;
@@ -49,13 +53,13 @@ export class CloudScraperRuleClient {
     this.token = options.token;
   }
 
-  async fetchRules(clientVersion = process.env.npm_package_version || 'dev'): Promise<ScraperRuleSet> {
+  async fetchRules(version = clientVersion()): Promise<ScraperRuleSet> {
     if (!this.baseURL || !this.token) {
       return {};
     }
 
     const url = new URL(`${this.baseURL}/api/rules`);
-    url.searchParams.set('clientVersion', clientVersion);
+    url.searchParams.set('clientVersion', version);
     const response = await fetch(url, {
       headers: {
         authorization: `Bearer ${this.token}`,
@@ -88,7 +92,7 @@ export class CloudScraperRuleClient {
       },
       body: JSON.stringify({
         jobType: input.jobType,
-        clientVersion: input.clientVersion || process.env.npm_package_version || 'dev',
+        clientVersion: input.clientVersion || clientVersion(),
         failures: input.failures,
       }),
     });

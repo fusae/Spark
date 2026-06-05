@@ -229,6 +229,7 @@ export class RuntimeTaskRunner {
       ? await aggregator.aggregateFrom(sources)
       : await aggregator.aggregateAll();
     progress.aggregation = this.formatAggregationStats(aggregation);
+    this.recordSuccessfulPlatformCredentials(configForUser.userId, aggregation);
     await this.reportScraperFailures(configForUser, jobType, aggregation, scraperRules, runLogId, progress);
     const totalCollected = aggregation.reduce((sum, stat) => sum + stat.itemsCollected, 0);
     const totalDeduped = aggregation.reduce((sum, stat) => sum + stat.itemsDeduped, 0);
@@ -661,6 +662,27 @@ export class RuntimeTaskRunner {
       status: 'invalid',
       message: failure.userMessage,
     });
+  }
+
+  private recordSuccessfulPlatformCredentials(
+    userId: string,
+    stats: Awaited<ReturnType<ContentAggregator['aggregateAll']>>
+  ): void {
+    const authenticatedPlatforms = new Set(['zhihu', 'douyin', 'xiaohongshu', 'weibo']);
+    stats
+      .filter((stat) =>
+        authenticatedPlatforms.has(stat.source) &&
+        stat.errors === 0 &&
+        stat.itemsCollected > 0
+      )
+      .forEach((stat) => {
+        this.db.upsertRuntimeCredentialCheck({
+          user_id: userId,
+          platform: stat.source,
+          status: 'valid',
+          message: `本次抓取成功，共抓到 ${stat.itemsCollected} 条内容`,
+        });
+      });
   }
 
   private formatAggregationStats(stats: Awaited<ReturnType<ContentAggregator['aggregateAll']>>): RuntimeTaskResult['aggregation'] {
