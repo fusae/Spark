@@ -1823,6 +1823,7 @@ class AdminServer {
     let selectedPlatformId = null;
     let logsRefreshTimer = null;
     let recommendationsRefreshTimer = null;
+    let overviewRefreshTimer = null;
     let knownUserIds = new Set();
     let latestRunStats = {};
     let overviewRunStats = {};
@@ -2197,6 +2198,31 @@ class AdminServer {
       } catch {
         return {};
       }
+    }
+
+    async function refreshOverviewRuns() {
+      if (!currentUserId || document.hidden) return;
+      const userId = currentUserId;
+      try {
+        const runs = await request(\`/api/runs?userId=\${encodeURIComponent(userId)}&limit=20\`);
+        if (userId !== currentUserId) return;
+        const latestRun = runs[0];
+        latestRunId = latestRun?.id ?? latestRunId;
+        latestRunStats = parseStats(latestRun?.stats_json);
+        overviewRunStats = mergedOverviewStats(runs);
+        updateRuntimeStatusFromRun(latestRun);
+        if (currentConfig) {
+          updateOverview(currentConfig);
+          updatePlatformStatus(currentConfig);
+        }
+      } catch (error) {
+        console.error('Failed to refresh overview runs:', error);
+      }
+    }
+
+    function startOverviewRefresh() {
+      if (overviewRefreshTimer) clearInterval(overviewRefreshTimer);
+      overviewRefreshTimer = setInterval(refreshOverviewRuns, 5000);
     }
 
     // Update overview
@@ -4210,6 +4236,7 @@ class AdminServer {
       loadUsers();
       loadUser().then(() => {
         if (initialTab) switchTab(initialTab);
+        startOverviewRefresh();
       });
     });
   </script>
